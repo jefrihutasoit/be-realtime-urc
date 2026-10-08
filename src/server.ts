@@ -3,13 +3,18 @@ import { createApp } from "./app.js";
 import { env } from "./config/env.js";
 import { migrate } from "./db/migrate.js";
 import { pool } from "./db/pool.js";
-import { startPoller } from "./services/poller.js";
+import { authStore } from "./services/auth-store.js";
+import { oeeStateStore } from "./services/oee-state-store.js";
+import { saveOeeStates, startPoller } from "./services/poller.js";
 import { loadShifts } from "./services/shift-store.js";
 import { createSocketServer } from "./socket/index.js";
 
 try {
   await migrate();
   await loadShifts();
+  await authStore.ensureDefaults();
+  const restored = await oeeStateStore.restore();
+  if (restored) console.log(`[oee] restored ${restored} OEE run state(s)`);
 } catch (err) {
   console.error(`[db] cannot prepare database "${env.db.database}" on ${env.db.host}:${env.db.port}:`, err);
   process.exit(1);
@@ -25,8 +30,10 @@ httpServer.listen(env.port, () => {
   );
 });
 
-function shutdown() {
+async function shutdown() {
   stopPoller();
+  // Keep the open OEE runs for the next start.
+  await saveOeeStates();
   io.close();
   httpServer.close(async () => {
     await pool.end();

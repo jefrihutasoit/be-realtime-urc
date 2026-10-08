@@ -39,6 +39,8 @@ src/
   db/                    koneksi MySQL, migration, script migrate/seed
   services/machine-store.ts  registry mesin (MySQL: machines, machine_monitoring_tags)
   services/oee-engine.ts perhitungan OEE per shift
+  services/oee-state-store.ts  simpan state OEE run tiap 10 detik (tabel oee_run_states) + saat shutdown,
+                         dipulihkan saat start sehingga restart tidak me-reset OEE shift berjalan
   services/poller.ts     baca tag tiap POLL_INTERVAL_MS lalu broadcast
   types/                 sama dengan types di frontend
 ```
@@ -66,6 +68,27 @@ src/
 | DELETE | `/shifts/:id` | hapus shift |
 | GET | `/settings/status-definition` | definisi status global (`StatusDefinition`) |
 | PUT | `/settings/status-definition` | simpan definisi status |
+| GET | `/settings/oee` | setting OEE global (`OeeSettings`): start counting, tipe counter, restart saat SKU ganti, pause saat Off, sumber reject untuk Quality (tag / Reject Input / keduanya), Off saat run = Breakdown, aturan finish run |
+| PUT | `/settings/oee` | simpan setting OEE global; perubahan selain aturan finish, sumber reject dan nama mesin memulai OEE run baru. `machineLabelEnabled` + `machineLabel` (mis. "Bagger") = nama pengganti "Machine" di dashboard |
+| GET | `/rejects/types` | daftar tipe reject (`RejectType`) |
+| POST | `/rejects/types` | daftarkan tipe reject (`{ name, sortOrder? }`) |
+| PATCH | `/rejects/types/:id` | ubah tipe reject |
+| DELETE | `/rejects/types/:id` | hapus tipe reject (409 bila sudah dipakai data reject) |
+| GET | `/rejects?date=YYYY-MM-DD&shiftId=` | data reject per mesin untuk tanggal (dan shift) tsb |
+| POST | `/rejects/validate` | cek sheet reject (`RejectUploadInput`): baris dengan SKU wajib cocok dengan mesin terdaftar dan SKU master (SKU + produk); baris tanpa SKU dilewati dengan warning |
+| POST | `/rejects/upload` | simpan sheet reject; ditolak (400) bila belum valid. Tipe reject baru dibuat otomatis, data mesin yang sudah ada untuk tanggal+shift tsb diganti |
+| GET | `/rejects/manual/dates` | tanggal yang boleh diinput manual (3 hari terakhir, waktu server) |
+| GET | `/rejects/manual/skus?machineId=&date=&shiftId=` | SKU yang jalan di mesin tsb pada shift itu (dari tag product) |
+| POST | `/rejects/manual` | simpan input manual (`ManualRejectInput`); 1 data per tanggal+shift+mesin+SKU, disimpan ulang = diganti |
+| DELETE | `/rejects/:id` | hapus satu data reject |
+| GET | `/summary?date=YYYY-MM-DD` | ringkasan 1 hari produksi (mulai shift pertama, 24 jam): OEE, output, reject, tren per jam, top reject, downtime per tipe, OEE per mesin. Dari tabel `oee_hourly` yang diisi engine tiap 10 detik |
+| GET | `/downtime?date=YYYY-MM-DD` | downtime hasil upload untuk tanggal tsb |
+| POST | `/downtime/validate` | cek sheet downtime (`DowntimeUploadInput`); hanya mesin yang diverifikasi: 1 baris 1 mesin, harus persis sama dengan nomor mesin terdaftar |
+| POST | `/downtime/upload` | simpan sheet downtime; baris dengan tanggal+mesin+bagger+start yang sama diganti |
+| DELETE | `/downtime/:id` | hapus satu baris downtime |
+| GET | `/backup` | export semua settingan (`SettingsBackup`): mesin + tag, SKU (tanpa foto), shift, status definition, posisi mesin di layout, tipe reject |
+| POST | `/backup/validate` | cek backup + ringkasan perubahan (tambah/ubah/hapus) tanpa menyimpan |
+| POST | `/backup/restore` | ganti semua settingan dengan backup (1 transaksi); ditolak (400) bila belum valid. Data dicocokkan lewat machine No / SKU ID / nama shift / nama tipe reject sehingga id & histori tetap |
 | POST | `/tag-values` | push nilai tag (`{ tagName, value, timestamp? }`), dipakai menu Simulator |
 | GET | `/tag-values/latest` | nilai terakhir semua tag yang terdaftar di mesin |
 | GET | `/tag-values/recent?limit=` | push terbaru |
@@ -76,6 +99,39 @@ src/
 Foto SKU dikirim sebagai data URL (`photo`), disimpan sebagai file di `UPLOAD_DIR/skus/`
 (default `uploads/skus/`, tidak masuk git) dan disajikan di `/uploads/skus/<file>`. Database hanya
 menyimpan nama file. `photo: null` menghapus foto; tidak mengirim `photo` berarti foto tetap.
+
+## Database (menu Settings → Database, khusus Engineering)
+
+| Method | Path | Keterangan |
+| --- | --- | --- |
+| GET | `/database/stats` | jumlah baris & ukuran per tabel |
+| GET | `/database/backup` | backup seluruh isi database (`.jsonl.gz`, di-stream); tanpa `user_sessions` & `schema_migrations` |
+| POST | `/database/restore` | body = file backup (`application/gzip`); mengganti seluruh isi database dalam 1 transaksi. Ditolak bila versi schema (migration) berbeda |
+| POST | `/database/clear/preview` | `{ from, to }` (YYYY-MM-DD): jumlah data yang akan terhapus |
+| POST | `/database/clear` | `{ from, to, confirm: "DELETE" }`: hapus tag values, OEE per jam, reject dan downtime dalam rentang tanggal |
+| POST | `/database/initialize` | `{ confirm: "INITIALIZE", keepUsers }`: kosongkan database seperti instalasi baru (shift default, akun default) |
+
+Selama restore / initialize / clear, poller berhenti sementara. Foto SKU & gambar layout (folder `uploads`) tidak
+ikut backup database; initialize menghapusnya.
+
+## Login & role
+
+Data dashboard (`GET /machines`, `/oee`, `/shifts`, `/skus`, `/layout`, `/summary`) bisa dibaca tanpa login
+(tamu). Endpoint lain butuh header `Authorization: Bearer <token>` dari `POST /auth/login`. Membaca data boleh
+untuk semua user yang login; perubahan dicek per permission di
+`src/middleware/auth.ts`. Role: **Engineering** (akun tersembunyi, dibuat dari `ENGINEERING_USERNAME` /
+`ENGINEERING_PASSWORD`; satu-satunya yang bisa Machine Management, Status Definition, Backup & Restore,
+Simulator), **Admin**, **Engineer**, **Operator** (permission diatur di User Management). Saat tabel user
+masih kosong dibuat Admin `admin` / `admin123`; ganti password setelah login.
+
+| Method | Path | Keterangan |
+| --- | --- | --- |
+| POST | `/auth/login` | `{ username, password }` → `{ token, user }` |
+| POST | `/auth/logout` | hapus sesi |
+| GET | `/auth/me` | user yang login + permission |
+| POST | `/auth/password` | ganti password sendiri `{ currentPassword, newPassword }` |
+| GET/POST/PATCH/DELETE | `/users` | kelola user (akun Engineering hanya tampil & bisa dikelola oleh akun Engineering) |
+| GET/PUT | `/users/roles` | permission per role |
 
 Error selalu berbentuk `{ "error": "..." }` (400 validasi, 404, 409 konflik).
 

@@ -12,6 +12,7 @@ import type {
   ProductionLogEntry,
   StatusEvent,
   TimelineSegment,
+  TimelineStatus,
 } from "../types/oee.js";
 import type { TagReading } from "../types/tag.js";
 
@@ -79,7 +80,7 @@ machinesRouter.get("/:id/history", async (req, res) => {
 
 /**
  * Status timeline of the current shift, built from the status tag's recorded timestamps.
- * Before the first reading the status is the last value recorded before the shift, or OFF when there is none.
+ * Before the first reading the status is the last value recorded before the shift, or NO_DATA when there is none.
  */
 machinesRouter.get("/:id/timeline", async (req, res) => {
   const machine = await getMachine(req.params.id);
@@ -97,7 +98,10 @@ machinesRouter.get("/:id/timeline", async (req, res) => {
   };
 
   const segments: TimelineSegment[] = [];
-  let current = { status: toStatus(before[0]?.value), start: shiftStart.getTime() };
+  let current: { status: TimelineStatus; start: number } = {
+    status: before[0] ? toStatus(before[0].value) : "NO_DATA",
+    start: shiftStart.getTime(),
+  };
   for (const r of readings) {
     const status = toStatus(r.value);
     if (status === current.status) continue;
@@ -109,7 +113,7 @@ machinesRouter.get("/:id/timeline", async (req, res) => {
   }
   segments.push({ status: current.status, start: new Date(current.start).toISOString(), end: now.toISOString() });
 
-  const totals: Record<MachineStatus, number> = { RUN: 0, STOP: 0, OFF: 0 };
+  const totals: Record<TimelineStatus, number> = { RUN: 0, STOP: 0, OFF: 0, NO_DATA: 0 };
   for (const s of segments) totals[s.status] += Math.round((Date.parse(s.end) - Date.parse(s.start)) / 1000);
 
   const timeline: MachineTimeline = {

@@ -55,7 +55,7 @@ function parsePhoto(value: unknown, currentPath: string | null): PhotoChange {
   return { data, ext };
 }
 
-function parseSkuInput(body: unknown, current?: SkuMaster): ParsedSku {
+export function parseSkuInput(body: unknown, current?: SkuMaster): ParsedSku {
   if (typeof body !== "object" || body === null) throw new HttpError(400, "Invalid request body");
   const b = body as Record<string, unknown>;
   const partial = !!current;
@@ -108,7 +108,7 @@ async function savePhoto(photo: { data: Buffer; ext: string }) {
   return file;
 }
 
-async function deletePhoto(file: string | null | undefined) {
+export async function deletePhoto(file: string | null | undefined) {
   if (!file) return;
   await unlink(path.join(SKU_PHOTO_DIR, path.basename(file))).catch((err: NodeJS.ErrnoException) => {
     if (err.code !== "ENOENT") console.warn(`[sku] could not delete photo ${file}:`, err.message);

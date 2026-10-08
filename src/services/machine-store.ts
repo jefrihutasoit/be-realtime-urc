@@ -2,14 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { PoolConnection, ResultSetHeader, RowDataPacket } from "mysql2/promise";
 import { pool, withTransaction } from "../db/pool.js";
 import { HttpError } from "../lib/http-error.js";
-import {
-  DEFAULT_OEE_CONFIG,
-  type MachineInput,
-  type MachineRegistration,
-  type MonitoringTag,
-  type OeeConfig,
-  type ProductionTagKey,
-} from "../types/machine.js";
+import type { MachineInput, MachineRegistration, MonitoringTag, ProductionTagKey } from "../types/machine.js";
 
 // Machine registry backed by MySQL (tables `machines` and `machine_monitoring_tags`).
 
@@ -24,10 +17,8 @@ export const PRODUCTION_TAGS: [ProductionTagKey, string][] = [
 const MAX_PHOTO_LENGTH = 700_000;
 const MAX_MONITORING_TAGS = 100;
 
-type ParsedInput = Omit<Partial<MachineInput>, "monitoringTags" | "oeeConfig"> & {
+type ParsedInput = Omit<Partial<MachineInput>, "monitoringTags"> & {
   monitoringTags?: MonitoringTag[];
-  /** Partial on PATCH; merged over the stored config. */
-  oeeConfig?: Partial<OeeConfig>;
 };
 
 interface MachineRow extends RowDataPacket {
@@ -41,10 +32,6 @@ interface MachineRow extends RowDataPacket {
   photo: string | null;
   is_active: number;
   oee_enabled: number;
-  oee_start_mode: string;
-  reset_on_sku_change: number;
-  pause_when_off: number;
-  counter_mode: string;
   created_at: Date;
   updated_at: Date;
 }
@@ -85,30 +72,8 @@ function parseMonitoringTags(value: unknown): MonitoringTag[] {
   return tags;
 }
 
-function parseOeeConfig(value: unknown): Partial<OeeConfig> {
-  if (typeof value !== "object" || value === null) throw new HttpError(400, "OEE settings must be an object");
-  const v = value as Record<string, unknown>;
-  const out: Partial<OeeConfig> = {};
-  if ("startMode" in v) {
-    if (v.startMode !== "sku" && v.startMode !== "always") throw new HttpError(400, 'OEE start mode must be "sku" or "always"');
-    out.startMode = v.startMode;
-  }
-  if ("counterMode" in v) {
-    if (v.counterMode !== "cumulative" && v.counterMode !== "direct") {
-      throw new HttpError(400, 'Counter mode must be "cumulative" or "direct"');
-    }
-    out.counterMode = v.counterMode;
-  }
-  for (const key of ["resetOnSkuChange", "pauseWhenOff"] as const) {
-    if (!(key in v)) continue;
-    if (typeof v[key] !== "boolean") throw new HttpError(400, `${key} must be true or false`);
-    out[key] = v[key];
-  }
-  return out;
-}
-
 /** Validates field shapes. With `partial`, only the fields present are checked (PATCH). */
-async function parseMachineInput(body: unknown, partial = false): Promise<ParsedInput> {
+export async function parseMachineInput(body: unknown, partial = false): Promise<ParsedInput> {
   if (typeof body !== "object" || body === null) throw new HttpError(400, "Invalid request body");
   const b = body as Record<string, unknown>;
   const data: ParsedInput = {};
@@ -147,7 +112,6 @@ async function parseMachineInput(body: unknown, partial = false): Promise<Parsed
     data[key] = b[key];
   }
 
-  if ("oeeConfig" in b) data.oeeConfig = parseOeeConfig(b.oeeConfig);
 
   return data;
 }
@@ -196,12 +160,6 @@ function toMachine(row: MachineRow, tags: MonitoringTag[]): MachineRegistration 
     photo: row.photo,
     isActive: !!row.is_active,
     oeeEnabled: !!row.oee_enabled,
-    oeeConfig: {
-      startMode: row.oee_start_mode === "always" ? "always" : "sku",
-      resetOnSkuChange: !!row.reset_on_sku_change,
-      pauseWhenOff: !!row.pause_when_off,
-      counterMode: row.counter_mode === "direct" ? "direct" : "cumulative",
-    },
     createdAt: row.created_at.toISOString(),
     updatedAt: row.updated_at.toISOString(),
   };
@@ -263,17 +221,14 @@ export const machineStore = {
     const now = new Date();
     const id = randomUUID();
     const m = data as Required<ParsedInput>;
-    const cfg: OeeConfig = { ...DEFAULT_OEE_CONFIG, ...data.oeeConfig };
 
     return withTransaction(async (conn) => {
       await assertNoConflict(conn, m);
       await conn.query<ResultSetHeader>(
         `INSERT INTO machines (id, machine_no, machine_name, tag_status, tag_output, tag_reject, tag_product,
-          photo, is_active, oee_enabled, oee_start_mode, reset_on_sku_change, pause_when_off, counter_mode,
-          created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          photo, is_active, oee_enabled, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [id, m.machineNo, m.machineName, m.tagStatus, m.tagOutput, m.tagReject, m.tagProduct,
-          m.photo, m.isActive, m.oeeEnabled, cfg.startMode, cfg.resetOnSkuChange, cfg.pauseWhenOff, cfg.counterMode,
-          now, now]
+          m.photo, m.isActive, m.oeeEnabled, now, now]
       );
       await saveMonitoringTags(conn, id, m.monitoringTags, new Set());
       return (await loadMachines(conn, id))[0];
@@ -287,15 +242,13 @@ export const machineStore = {
       const [current] = await loadMachines(conn, id);
       if (!current) throw new HttpError(404, "Machine not found");
 
-      const m = { ...current, ...data, oeeConfig: { ...current.oeeConfig, ...data.oeeConfig } };
+      const m = { ...current, ...data };
       await assertNoConflict(conn, m, id);
       await conn.query(
         `UPDATE machines SET machine_no = ?, machine_name = ?, tag_status = ?, tag_output = ?, tag_reject = ?,
-          tag_product = ?, photo = ?, is_active = ?, oee_enabled = ?, oee_start_mode = ?, reset_on_sku_change = ?,
-          pause_when_off = ?, counter_mode = ?, updated_at = ? WHERE id = ?`,
+          tag_product = ?, photo = ?, is_active = ?, oee_enabled = ?, updated_at = ? WHERE id = ?`,
         [m.machineNo, m.machineName, m.tagStatus, m.tagOutput, m.tagReject, m.tagProduct,
-          m.photo, m.isActive, m.oeeEnabled, m.oeeConfig.startMode, m.oeeConfig.resetOnSkuChange,
-          m.oeeConfig.pauseWhenOff, m.oeeConfig.counterMode, new Date(), id]
+          m.photo, m.isActive, m.oeeEnabled, new Date(), id]
       );
       if (data.monitoringTags) {
         const ownIds = new Set(current.monitoringTags.map((t) => t.id));

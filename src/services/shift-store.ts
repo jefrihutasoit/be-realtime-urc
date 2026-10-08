@@ -19,7 +19,7 @@ interface ShiftRow extends RowDataPacket {
   updated_at: Date;
 }
 
-interface ShiftDef {
+export interface ShiftDef {
   id: string;
   name: string;
   start: number;
@@ -29,7 +29,7 @@ interface ShiftDef {
 
 const pad = (n: number) => String(n).padStart(2, "0");
 const toLabel = (minute: number) => `${pad(Math.floor((minute % DAY) / 60))}:${pad(minute % 60)}`;
-const durationOf = (start: number, end: number) => (end - start + DAY) % DAY || DAY;
+export const durationOf = (start: number, end: number) => (end - start + DAY) % DAY || DAY;
 
 const toShift = (r: ShiftRow): Shift => ({
   id: r.id,
@@ -42,6 +42,9 @@ const toShift = (r: ShiftRow): Shift => ({
 });
 
 let cache: ShiftDef[] = [];
+
+/** Current shift definitions (start in minutes after midnight, duration in minutes). */
+export const shiftDefs = (): readonly ShiftDef[] => cache;
 
 async function selectAll() {
   const [rows] = await pool.query<ShiftRow[]>("SELECT * FROM shifts ORDER BY start_minute");
@@ -121,14 +124,14 @@ export function shiftPeriodAt(at: Date): ShiftPeriod {
 
 // ---------- validation ----------
 
-function parseTime(value: unknown, label: string) {
+export function parseTime(value: unknown, label: string) {
   const m = typeof value === "string" ? TIME_PATTERN.exec(value.trim()) : null;
   if (!m) throw new HttpError(400, `${label} must be a time in HH:mm format`);
   return Number(m[1]) * 60 + Number(m[2]);
 }
 
 /** True when two shifts share any minute, including across midnight. */
-function overlaps(a: ShiftDef, b: ShiftDef) {
+export function overlaps(a: ShiftDef, b: ShiftDef) {
   return [-DAY, 0, DAY].some((k) => a.start < b.start + k + b.duration && b.start + k < a.start + a.duration);
 }
 
