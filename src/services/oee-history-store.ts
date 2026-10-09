@@ -2,11 +2,14 @@ import type { RowDataPacket } from "mysql2/promise";
 import { pool } from "../db/pool.js";
 import { returnHourlyBuckets, takeHourlyBuckets } from "./oee-engine.js";
 
-// Hourly OEE figures per machine (`oee_hourly`), added up from the engine's buckets. Used by the summary.
+// Hourly OEE figures per machine and SKU (`oee_hourly`), added up from the engine's buckets. Used by the
+// summary and the reports.
 
 export interface HourlyRow {
   machineId: string;
   hourStart: number;
+  /** Product tag code; "-" without a SKU, "" for rows saved before the SKU was recorded. */
+  skuCode: string;
   countedMs: number;
   runMs: number;
   stopMs: number;
@@ -23,7 +26,7 @@ export const oeeHistoryStore = {
     if (!list.length) return;
     try {
       await pool.query(
-        `INSERT INTO oee_hourly (machine_id, hour_start, counted_ms, run_ms, stop_ms, ideal_output, output, reject_tag,
+        `INSERT INTO oee_hourly (machine_id, hour_start, sku_code, counted_ms, run_ms, stop_ms, ideal_output, output, reject_tag,
           st_run_ms, st_stop_ms, st_off_ms) VALUES ?
           ON DUPLICATE KEY UPDATE counted_ms = counted_ms + VALUES(counted_ms), run_ms = run_ms + VALUES(run_ms),
             stop_ms = stop_ms + VALUES(stop_ms), ideal_output = ideal_output + VALUES(ideal_output),
@@ -34,6 +37,7 @@ export const oeeHistoryStore = {
           list.map((b) => [
             b.machineId,
             new Date(b.hourStart),
+            b.skuCode.slice(0, 100),
             Math.round(b.countedMs),
             Math.round(b.runMs),
             Math.round(b.stopMs),
@@ -61,6 +65,7 @@ export const oeeHistoryStore = {
     return rows.map((r) => ({
       machineId: r.machine_id,
       hourStart: (r.hour_start as Date).getTime(),
+      skuCode: String(r.sku_code ?? ""),
       countedMs: Number(r.counted_ms),
       runMs: Number(r.run_ms),
       stopMs: Number(r.stop_ms),

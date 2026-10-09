@@ -288,4 +288,15 @@ export const migrations: { id: string; sql: string[] }[] = [
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci`,
     ],
   },
+  {
+    id: "015_oee_hourly_sku",
+    sql: [
+      // The SKU (product tag code) the hour was counted for, so reports can split by SKU. A machine can run
+      // several SKUs in one hour. '' marks rows saved before this column existed (SKU unknown).
+      `ALTER TABLE oee_hourly
+        ADD COLUMN sku_code VARCHAR(100) NOT NULL DEFAULT '' AFTER hour_start,
+        DROP PRIMARY KEY,
+        ADD PRIMARY KEY (machine_id, hour_start, sku_code)`,
+    ],
+  },
 ];

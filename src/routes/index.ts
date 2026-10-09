@@ -7,6 +7,8 @@ import { databaseRouter } from "./database.js";
 import { usersRouter } from "./users.js";
 import { downtimeRouter } from "./downtime.js";
 import { summaryRouter } from "./summary.js";
+import { reportsRouter } from "./reports.js";
+import { historicalRouter } from "./historical.js";
 import { getLatest } from "../services/poller.js";
 import { machinesRouter } from "./machines.js";
 import { layoutRouter } from "./layout.js";
@@ -37,6 +39,8 @@ apiRouter.use("/backup", backupRouter);
 apiRouter.use("/database", databaseRouter);
 apiRouter.use("/downtime", downtimeRouter);
 apiRouter.use("/summary", summaryRouter);
+apiRouter.use("/reports", reportsRouter);
+apiRouter.use("/historical", historicalRouter);
 
 apiRouter.get("/gateway/tags", async (_req, res) => {
   res.json(await gateway.listTags());

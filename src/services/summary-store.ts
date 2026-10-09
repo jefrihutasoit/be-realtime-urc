@@ -16,7 +16,7 @@ const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 
 const round1 = (v: number) => Math.round(v * 10) / 10;
 
-interface Totals {
+export interface Totals {
   countedMs: number;
   runMs: number;
   idealOutput: number;
@@ -24,7 +24,7 @@ interface Totals {
   reject: number;
 }
 
-function figures(t: Totals): OeeFigures {
+export function figures(t: Totals): OeeFigures {
   if (t.countedMs <= 0) return { oee: null, availability: null, performance: null, quality: null };
   const a = t.runMs / t.countedMs;
   const p = t.idealOutput > 0 ? t.output / t.idealOutput : 0;
@@ -38,7 +38,7 @@ function figures(t: Totals): OeeFigures {
 }
 
 /** Local start of the production day: the date at the earliest shift start (midnight without shifts). */
-function dayStartOf(date: string) {
+export function dayStartOf(date: string) {
   const [y, m, d] = date.split("-").map(Number);
   const first = Math.min(...shiftDefs().map((s) => s.start), 24 * 60) % (24 * 60);
   return new Date(y, m - 1, d, 0, shiftDefs().length ? first : 0);

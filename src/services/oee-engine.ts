@@ -58,6 +58,8 @@ interface MachineState {
   lastCounting: boolean;
   /** Ideal rate (packs/min) in effect since the last sample. */
   lastRate: number;
+  /** Product tag code in effect since the last sample; the hourly bucket of the interval is booked to it. */
+  lastSkuCode?: string;
   /** Last raw counter values, tracked across runs so a new run starts from the current counter. */
   lastOutputCounter: number | null;
   lastRejectCounter: number | null;
@@ -96,6 +98,8 @@ export interface HourlyBucket {
   machineId: string;
   /** Local clock hour, as epoch ms. */
   hourStart: number;
+  /** Product tag code ("-" without a SKU). */
+  skuCode: string;
   countedMs: number;
   runMs: number;
   stopMs: number;
@@ -108,15 +112,16 @@ export interface HourlyBucket {
 
 const buckets = new Map<string, HourlyBucket>();
 
-function bucketFor(machineId: string, at: number) {
+function bucketFor(machineId: string, at: number, skuCode: string) {
   const hour = new Date(at);
   hour.setMinutes(0, 0, 0);
-  const key = `${machineId}|${hour.getTime()}`;
+  const key = `${machineId}|${hour.getTime()}|${skuCode}`;
   let b = buckets.get(key);
   if (!b) {
     b = {
       machineId,
       hourStart: hour.getTime(),
+      skuCode,
       countedMs: 0,
       runMs: 0,
       stopMs: 0,
@@ -140,7 +145,7 @@ export function takeHourlyBuckets() {
 /** Puts buckets back after they could not be saved, so the next save includes them. */
 export function returnHourlyBuckets(list: HourlyBucket[]) {
   for (const old of list) {
-    const b = bucketFor(old.machineId, old.hourStart);
+    const b = bucketFor(old.machineId, old.hourStart, old.skuCode);
     b.countedMs += old.countedMs;
     b.runMs += old.runMs;
     b.stopMs += old.stopMs;
@@ -244,6 +249,7 @@ export function updateOee(machine: MachineRegistration, sample: Sample, ctx: Sam
       rulesKey: "",
       lastCounting: gateWait === null,
       lastRate: ctx.idealRate,
+      lastSkuCode: ctx.sku.code,
       lastOutputCounter: base ? base.output : sample.output,
       lastRejectCounter: base ? base.reject : sample.reject,
     };
@@ -260,9 +266,9 @@ export function updateOee(machine: MachineRegistration, sample: Sample, ctx: Sam
   const run = s.run;
 
   // Credit the interval since the last sample, using the status, rate and gate seen at its start.
-  // The same amounts go to the hour's bucket for the daily summary.
+  // The same amounts go to the bucket of the hour and SKU for the daily summary and reports.
   const gap = now - s.lastSampleAt;
-  const bucket = bucketFor(machine.id, now);
+  const bucket = bucketFor(machine.id, now, s.lastSkuCode ?? ctx.sku.code);
   if (gap > 0 && gap <= MAX_CREDIT_GAP_MS) bucket.statusMs[s.lastStatus] += gap;
   if (s.lastCounting && gap <= MAX_CREDIT_GAP_MS) {
     const ms = gap;
@@ -343,6 +349,7 @@ export function updateOee(machine: MachineRegistration, sample: Sample, ctx: Sam
   s.lastStatus = status;
   s.lastBreakdown = breakdown && counting;
   s.lastRate = ctx.idealRate;
+  s.lastSkuCode = ctx.sku.code;
   s.lastCounting = counting;
   s.lastSampleAt = now;
 
