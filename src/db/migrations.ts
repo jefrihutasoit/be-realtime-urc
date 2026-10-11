@@ -299,4 +299,31 @@ export const migrations: { id: string; sql: string[] }[] = [
         ADD PRIMARY KEY (machine_id, hour_start, sku_code)`,
     ],
   },
+  {
+    id: "016_monitoring_tag_unit",
+    sql: [
+      // Display unit of a monitoring tag value, e.g. "°C" or "ppm". '' means no unit.
+      `ALTER TABLE machine_monitoring_tags
+        ADD COLUMN unit VARCHAR(20) NOT NULL DEFAULT '' AFTER tag_name`,
+    ],
+  },
+  {
+    id: "017_machine_production_units",
+    sql: [
+      // Display units of the output and reject counters, e.g. "pcs" or "pack". '' means no unit.
+      `ALTER TABLE machines
+        ADD COLUMN output_unit VARCHAR(20) NOT NULL DEFAULT 'pcs' AFTER tag_product,
+        ADD COLUMN reject_unit VARCHAR(20) NOT NULL DEFAULT 'pcs' AFTER output_unit`,
+    ],
+  },
+  {
+    id: "018_machine_realtime_mode",
+    sql: [
+      // Realtime tags: "registered" (monitoring tags of the machine) or "adaptive" (whatever the gateway
+      // publishes on the machine's topic, kept in memory; dropped after adaptive_ttl_min without updates).
+      `ALTER TABLE machines
+        ADD COLUMN realtime_mode VARCHAR(12) NOT NULL DEFAULT 'registered' AFTER reject_unit,
+        ADD COLUMN adaptive_ttl_min INT NOT NULL DEFAULT 480 AFTER realtime_mode`,
+    ],
+  },
 ];

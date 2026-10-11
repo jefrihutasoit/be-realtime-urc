@@ -70,10 +70,27 @@ export interface MachineOee {
   updatedAt: string;
 }
 
-/** Live values of one machine's monitoring tags, keyed by MonitoringTag.id. */
+/** One realtime tag value: a registered monitoring tag, or an adaptive tag published by the gateway. */
+export interface MonitoringValue {
+  id: string;
+  name: string;
+  tagName: string;
+  unit: string;
+  /** Adaptive tags may carry text (e.g. "OK"); registered tags are numbers. */
+  value: number | string | null;
+  /** Adaptive tags: when it was last published. */
+  updatedAt?: string;
+}
+
+export type AdaptiveTagValue = MonitoringValue & { value: number | string; updatedAt: string };
+
+/** Live values of one machine's realtime tags. Registered values are keyed by MonitoringTag.id. */
 export interface MachineMonitoring {
   machineId: string;
-  values: { id: string; name: string; tagName: string; value: number | null }[];
+  mode: "registered" | "adaptive";
+  /** Adaptive mode: the MQTT topic the machine's tags are expected on, e.g. "urc/oee/1A". */
+  topic?: string;
+  values: MonitoringValue[];
   updatedAt: string;
 }
 

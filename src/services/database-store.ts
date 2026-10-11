@@ -7,10 +7,15 @@ import { createGunzip, createGzip } from "node:zlib";
 import type { Connection as CallbackConnection } from "mysql2";
 import type { PoolConnection, RowDataPacket } from "mysql2/promise";
 import { env } from "../config/env.js";
+import { dbConfig } from "../config/db-config.js";
 import { pool } from "../db/pool.js";
 import { HttpError } from "../lib/http-error.js";
 import { authStore } from "./auth-store.js";
+import { gatewayManager } from "./gateway-manager.js";
+import { gatewaySettingsStore } from "./gateway-settings.js";
 import { resetEngine } from "./oee-engine.js";
+import { systemLog } from "./system-log.js";
+import { tagIngest } from "./tag-ingest.js";
 import { oeeHistoryStore } from "./oee-history-store.js";
 import { oeeStateStore } from "./oee-state-store.js";
 import { withPollerPaused } from "./poller.js";
@@ -104,8 +109,13 @@ function rangeTargets(r: ReturnType<typeof parseRange>): [string, string, string
 }
 
 /** Brings the in-memory state back in line with the database after it was changed underneath. */
-async function reloadState() {
+async function reloadState(event: string) {
+  systemLog.add("DATABASE_RESTORED", event);
   resetEngine();
+  tagIngest.reset();
+  gatewaySettingsStore.forget();
+  // The restored database may hold other gateway settings (ports, broker).
+  await gatewayManager.apply(await gatewaySettingsStore.get()).catch((err) => console.error("[gateway]", err));
   await loadShifts();
   settingsStore.clearCache();
   authStore.clearCache();
@@ -137,7 +147,7 @@ export const databaseStore = {
     const [[range]] = await pool.query<RowDataPacket[]>("SELECT MIN(recorded_at) AS oldest, MAX(recorded_at) AS newest FROM tag_values");
     const migrations = await migrationIds();
     return {
-      database: env.db.database,
+      database: dbConfig().database,
       schemaVersion: migrations.at(-1) ?? null,
       tables,
       tagValues: {
@@ -165,7 +175,7 @@ export const databaseStore = {
         format: FORMAT,
         version: VERSION,
         exportedAt: new Date().toISOString(),
-        database: env.db.database,
+        database: dbConfig().database,
         migrations: await migrationIds(conn),
         tables,
       });
@@ -278,7 +288,7 @@ export const databaseStore = {
         conn.release();
         input.resume();
       }
-      await reloadState();
+      await reloadState("Database restored from a backup file");
       return { exportedAt: (header as BackupHeader | null)?.exportedAt ?? null, tables: counts };
     });
   },
@@ -311,7 +321,10 @@ export const databaseStore = {
         const coversNow = range.end.getTime() > Date.now() && range.start.getTime() <= Date.now();
         if (coversNow) await conn.query("DELETE FROM oee_run_states");
         await conn.commit();
-        if (coversNow) resetEngine();
+        if (coversNow) {
+          resetEngine();
+          tagIngest.reset();
+        }
       } catch (err) {
         await conn.rollback();
         throw err;
@@ -357,7 +370,7 @@ export const databaseStore = {
         conn.release();
       }
       await clearUploads();
-      await reloadState();
+      await reloadState("Database initialized (data cleared)");
       return { keepUsers };
     });
   },

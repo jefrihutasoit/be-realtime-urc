@@ -1,7 +1,8 @@
 import { createHash, randomBytes, randomUUID, scrypt as scryptCb, timingSafeEqual } from "node:crypto";
 import { promisify } from "node:util";
 import type { ResultSetHeader, RowDataPacket } from "mysql2/promise";
-import { pool } from "../db/pool.js";
+import { dbHealth, pool } from "../db/pool.js";
+import { recoveryLogins, saveRecoveryLogins, setupSessions } from "./setup-auth.js";
 import { HttpError } from "../lib/http-error.js";
 import {
   DEFAULT_ROLE_PERMISSIONS,
@@ -194,6 +195,7 @@ export const authStore = {
     const b = (body ?? {}) as Record<string, unknown>;
     const username = typeof b.username === "string" ? b.username.trim() : "";
     const password = typeof b.password === "string" ? b.password : "";
+    if (!dbHealth.ready) return this.setupLogin(username, password);
     const [rows] = await pool.query<UserRow[]>("SELECT * FROM users WHERE username = ?", [username]);
     const row = rows[0];
     if (!row || !row.is_active || !(await verifyPassword(password, row.password_hash))) {
@@ -209,11 +211,48 @@ export const authStore = {
     ]);
     await pool.query("UPDATE users SET last_login_at = ? WHERE id = ?", [now, row.id]);
     await pool.query("DELETE FROM user_sessions WHERE expires_at < ?", [now]);
+    if (row.role === "ENGINEERING") await this.saveRecoveryLogins();
     return { token, user: await this.me(row) };
   },
 
+  /**
+   * Login while the database is down: Engineering accounts only, checked against the local copy of their
+   * password hashes (or the .env Engineering login when no copy exists yet).
+   */
+  async setupLogin(username: string, password: string) {
+    const saved = recoveryLogins();
+    let name: string | null = null;
+    if (saved) {
+      const login = saved.find((l) => l.username === username);
+      if (login && (await verifyPassword(password, login.passwordHash))) name = login.name;
+    } else if (
+      username === (process.env.ENGINEERING_USERNAME || "engineering") &&
+      password === (process.env.ENGINEERING_PASSWORD || "engineering")
+    ) {
+      name = "Engineering";
+    }
+    if (!name) {
+      throw new HttpError(401, "The database is not connected: only an Engineering account can log in to fix it");
+    }
+    const session = setupSessions.create(username, name);
+    return { token: session.token, user: { ...session.user, permissions: ALL_PERMISSIONS } };
+  },
+
+  /** Copies the Engineering logins to the local recovery file (see setup-auth.ts). */
+  async saveRecoveryLogins() {
+    const [rows] = await pool.query<UserRow[]>("SELECT username, name, password_hash FROM users WHERE role = 'ENGINEERING' AND is_active = 1");
+    saveRecoveryLogins(rows.map((r) => ({ username: r.username, name: r.name, passwordHash: r.password_hash })));
+  },
+
   async logout(token: string) {
+    if (setupSessions.remove(token)) return;
     await pool.query("DELETE FROM user_sessions WHERE token_hash = ?", [tokenHash(token)]);
+  },
+
+  /** A setup-mode session (database down), with all permissions. */
+  setupUser(token: string): Me | null {
+    const user = setupSessions.get(token);
+    return user && { ...user, permissions: ALL_PERMISSIONS };
   },
 
   /** The user of a session token, or null when the token is unknown, expired or the user is inactive. */
@@ -244,6 +283,7 @@ export const authStore = {
       new Date(),
       userId,
     ]);
+    if (row.role === "ENGINEERING") await this.saveRecoveryLogins();
   },
 
   // ---------- user management (Engineering accounts are hidden from everyone else) ----------

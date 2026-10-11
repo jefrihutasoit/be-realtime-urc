@@ -1,8 +1,11 @@
 import { env } from "../config/env.js";
+import { dbHealth } from "../db/pool.js";
 import { HttpError } from "../lib/http-error.js";
 import type { MachineMonitoring, MachineOee, Sku } from "../types/oee.js";
 import type { SkuMaster } from "../types/sku.js";
+import { adaptiveTags } from "./adaptive-tags.js";
 import { gateway } from "./gateway.js";
+import { gatewaySettingsStore, machineTopic } from "./gateway-settings.js";
 import { machineStore } from "./machine-store.js";
 import { oeeHistoryStore } from "./oee-history-store.js";
 import { oeeStateStore } from "./oee-state-store.js";
@@ -94,6 +97,9 @@ async function pollOnce(): Promise<PollResult> {
   }
 
   const updatedAt = new Date(now).toISOString();
+  // Adaptive tags not published within their machine's expiry leave the list.
+  adaptiveTags.prune(new Map(all.map((m) => [m.id, m.adaptiveTtlMinutes])), now);
+  const topicFilter = gatewaySettingsStore.cached()?.mqtt.topic ?? "urc/oee/#";
 
   return {
     oee: machines.map((m) => {
@@ -121,11 +127,16 @@ async function pollOnce(): Promise<PollResult> {
         now
       );
     }),
-    monitoring: machines.map((m) => ({
-      machineId: m.id,
-      values: m.monitoringTags.map((t) => ({ ...t, value: toNumber(values[t.tagName]) })),
-      updatedAt,
-    })),
+    monitoring: machines.map((m) =>
+      m.realtimeMode === "adaptive"
+        ? { machineId: m.id, mode: "adaptive", topic: machineTopic(topicFilter, m.machineNo), values: adaptiveTags.values(m.id), updatedAt }
+        : {
+            machineId: m.id,
+            mode: "registered",
+            values: m.monitoringTags.map((t) => ({ ...t, value: toNumber(values[t.tagName]) })),
+            updatedAt,
+          }
+    ),
   };
 }
 
@@ -168,7 +179,8 @@ export async function withPollerPaused<T>(fn: () => Promise<T>): Promise<T> {
 export function startPoller(onResult: (result: PollResult) => void) {
   let lastSaved = Date.now();
   const timer = setInterval(async () => {
-    if (busy || paused) return; // skip a tick rather than pile up slow reads
+    // Skip a tick rather than pile up slow reads; nothing to do while the database is down.
+    if (busy || paused || !dbHealth.ready) return;
     busy = true;
     try {
       latest = await pollOnce();

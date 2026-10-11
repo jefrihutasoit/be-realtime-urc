@@ -15,8 +15,10 @@
     "node": ">=22"
   },
   "dependencies": {
+    "aedes": "^1.2.0",
     "cors": "^2.8.6",
     "express": "^5.2.1",
+    "mqtt": "^5.16.0",
     "mysql2": "^3.24.5",
     "socket.io": "^4.8.4"
   },

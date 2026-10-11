@@ -1,12 +1,14 @@
 import { env } from "../config/env.js";
 import type { GatewayTag } from "../types/machine.js";
+import { tagIngest } from "./tag-ingest.js";
 import { tagValueStore } from "./tag-value-store.js";
 
 /**
  * Abstraction over the PLC/IoT gateway. Values are returned as text because some tags
  * (e.g. the product code) are not numeric; callers parse numbers where they need them.
  *
- *   GATEWAY_MODE=database  the gateway pushes readings into `tag_values` (default; the Simulator page writes there too)
+ *   GATEWAY_MODE=database  readings come through tag-ingest (HTTP batch, MQTT, Simulator) or are inserted into
+ *                          `tag_values` directly (default); current values are served from tag-ingest's memory cache
  *   GATEWAY_MODE=random    in-memory random generator, no database writes needed
  */
 export interface GatewayDriver {
@@ -47,7 +49,7 @@ const toRecord = (tags: string[], readings: { tagName: string; value: string }[]
   return out;
 };
 
-/** Reads the newest pushed value of each tag from the `tag_values` table. */
+/** Current values from the ingest cache; baselines from the `tag_values` table. */
 class DatabaseDriver implements GatewayDriver {
   async listTags() {
     const pushed = await tagValueStore.distinctTags();
@@ -58,8 +60,8 @@ class DatabaseDriver implements GatewayDriver {
     ];
   }
 
-  async read(tags: string[]) {
-    return toRecord(tags, await tagValueStore.latest(tags));
+  read(tags: string[]) {
+    return tagIngest.read(tags);
   }
 
   async readBefore(tags: string[], before: Date) {

@@ -1,9 +1,10 @@
 import { Router } from "express";
-import { gateway } from "../services/gateway.js";
 import { authenticate } from "../middleware/auth.js";
 import { authRouter } from "./auth.js";
 import { backupRouter } from "./backup.js";
 import { databaseRouter } from "./database.js";
+import { gatewayRouter } from "./gateway.js";
+import { systemRouter } from "./system.js";
 import { usersRouter } from "./users.js";
 import { downtimeRouter } from "./downtime.js";
 import { summaryRouter } from "./summary.js";
@@ -42,9 +43,8 @@ apiRouter.use("/summary", summaryRouter);
 apiRouter.use("/reports", reportsRouter);
 apiRouter.use("/historical", historicalRouter);
 
-apiRouter.get("/gateway/tags", async (_req, res) => {
-  res.json(await gateway.listTags());
-});
+apiRouter.use("/gateway", gatewayRouter);
+apiRouter.use("/system", systemRouter);
 
 /** Latest OEE snapshot, for the dashboard's first render before the socket delivers. */
 apiRouter.get("/oee", (_req, res) => {

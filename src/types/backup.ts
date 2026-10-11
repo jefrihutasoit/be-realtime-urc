@@ -1,4 +1,6 @@
 // Keep in sync with oee-realtime-urc/src/types/backup.ts
+import type { GatewaySettings } from "./gateway.js";
+import type { AppearanceSettings } from "./system.js";
 import type { RolePermissions } from "./auth.js";
 import type { OeeSettings, StatusDefinition } from "./settings.js";
 
@@ -23,6 +25,13 @@ export interface SettingsBackup {
   /** Machine positions on the plant layout (3D layout mapping). */
   layoutMarkers: BackupLayoutMarker[];
   rejectTypes: BackupRejectType[];
+  /**
+   * HTTP / MQTT gateway channels and storage, incl. the API key and MQTT password (keep the file safe).
+   * A backup without them keeps the current gateway settings.
+   */
+  gatewaySettings?: GatewaySettings;
+  /** Theme; a backup without it keeps the current one. */
+  appearance?: AppearanceSettings;
 }
 
 export interface BackupMachine {
@@ -32,11 +41,15 @@ export interface BackupMachine {
   tagOutput: string;
   tagReject: string;
   tagProduct: string;
+  outputUnit: string;
+  rejectUnit: string;
+  realtimeMode: "registered" | "adaptive";
+  adaptiveTtlMinutes: number;
   isActive: boolean;
   oeeEnabled: boolean;
   /** Only photo paths (e.g. "/machines/packing-machine.svg"); uploaded photos are not in the backup. */
   photo: string | null;
-  monitoringTags: { name: string; tagName: string }[];
+  monitoringTags: { name: string; tagName: string; unit: string }[];
 }
 
 export interface BackupSku {

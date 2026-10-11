@@ -3,11 +3,15 @@ import { pool } from "../db/pool.js";
 import { HttpError } from "../lib/http-error.js";
 import type { MachineStatus } from "../types/oee.js";
 import { DEFAULT_OEE_SETTINGS, type FinishRule, type OeeSettings, type StatusDefinition } from "../types/settings.js";
+import { DEFAULT_APPEARANCE, type AppearanceSettings } from "../types/system.js";
 
 // Global settings in `app_settings` (JSON values). Cached in memory because the poller reads them every tick.
 
 const STATUS_KEY = "status_definition";
 const OEE_KEY = "oee_settings";
+export const APPEARANCE_KEY = "appearance";
+const MODES: AppearanceSettings["mode"][] = ["light", "dark"];
+const ACCENTS: AppearanceSettings["accent"][] = ["blue", "teal", "indigo", "green", "red", "orange"];
 const FINISH_SKU = ["notInMaster", "empty", "any"];
 const FINISH_STATUS = ["RUN", "STOP", "OFF", "ANY"];
 const MAX_FINISH_RULES = 10;
@@ -18,6 +22,16 @@ export const DEFAULT_STATUS_DEFINITION: StatusDefinition = { run: [1], stop: [0]
 
 let statusCache: StatusDefinition | null = null;
 let oeeCache: OeeSettings | null = null;
+let appearanceCache: AppearanceSettings | null = null;
+
+export function parseAppearance(body: unknown): AppearanceSettings {
+  const b = (typeof body === "object" && body !== null ? body : {}) as Record<string, unknown>;
+  const mode = (b.mode ?? DEFAULT_APPEARANCE.mode) as AppearanceSettings["mode"];
+  const accent = (b.accent ?? DEFAULT_APPEARANCE.accent) as AppearanceSettings["accent"];
+  if (!MODES.includes(mode)) throw new HttpError(400, `Theme mode must be ${MODES.join(" or ")}`);
+  if (!ACCENTS.includes(accent)) throw new HttpError(400, `Accent color must be one of ${ACCENTS.join(", ")}`);
+  return { mode, accent };
+}
 
 function parseValues(value: unknown, label: string): number[] {
   if (!Array.isArray(value)) throw new HttpError(400, `${label} values must be a list`);
@@ -107,12 +121,12 @@ export function parseOeeSettings(body: unknown): OeeSettings {
   };
 }
 
-async function readSetting(key: string) {
+export async function readSetting(key: string) {
   const [rows] = await pool.query<RowDataPacket[]>("SELECT setting_value FROM app_settings WHERE setting_key = ?", [key]);
   return rows[0] ? JSON.parse(rows[0].setting_value) : undefined;
 }
 
-async function writeSetting(key: string, value: unknown) {
+export async function writeSetting(key: string, value: unknown) {
   await pool.query(
     `INSERT INTO app_settings (setting_key, setting_value, updated_at) VALUES (?, ?, ?)
       ON DUPLICATE KEY UPDATE setting_value = VALUES(setting_value), updated_at = VALUES(updated_at)`,
@@ -121,6 +135,26 @@ async function writeSetting(key: string, value: unknown) {
 }
 
 export const settingsStore = {
+  async getAppearance(): Promise<AppearanceSettings> {
+    if (appearanceCache) return appearanceCache;
+    let value = DEFAULT_APPEARANCE;
+    try {
+      const stored = await readSetting(APPEARANCE_KEY);
+      if (stored !== undefined) value = parseAppearance(stored);
+    } catch (err) {
+      console.warn("[settings] stored appearance is invalid, using defaults:", (err as Error).message);
+    }
+    appearanceCache = value;
+    return value;
+  },
+
+  async updateAppearance(body: unknown): Promise<AppearanceSettings> {
+    const value = parseAppearance(body);
+    await writeSetting(APPEARANCE_KEY, value);
+    appearanceCache = value;
+    return value;
+  },
+
   async getStatusDefinition(): Promise<StatusDefinition> {
     if (statusCache) return statusCache;
     const [rows] = await pool.query<RowDataPacket[]>(
@@ -174,6 +208,7 @@ export const settingsStore = {
   clearCache() {
     statusCache = null;
     oeeCache = null;
+    appearanceCache = null;
   },
 };
 

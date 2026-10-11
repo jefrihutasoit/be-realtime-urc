@@ -1,12 +1,12 @@
 import mysql, { type RowDataPacket } from "mysql2/promise";
-import { env } from "../config/env.js";
+import { dbConfig } from "../config/db-config.js";
 import { migrations } from "./migrations.js";
 import { pool } from "./pool.js";
 
 /** Creates the database if needed, then applies pending migrations. Safe to run on every start. */
 export async function migrate() {
-  const { database, ...server } = env.db;
-  const admin = await mysql.createConnection(server);
+  const { database, ...server } = dbConfig();
+  const admin = await mysql.createConnection({ ...server, connectTimeout: 5000 });
   try {
     await admin.query(
       `CREATE DATABASE IF NOT EXISTS ${mysql.escapeId(database)} CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci`

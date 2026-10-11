@@ -1,24 +1,14 @@
 import { Router } from "express";
 import { HttpError } from "../lib/http-error.js";
-import { machineStore } from "../services/machine-store.js";
+import { gatewaySettingsStore } from "../services/gateway-settings.js";
+import { ingestAndLog } from "../services/gateway-manager.js";
+import { registeredTags, tagIngest } from "../services/tag-ingest.js";
 import { tagValueStore } from "../services/tag-value-store.js";
 
-// Tag readings in `tag_values`. POST is what the Simulator page uses to act as the gateway.
+// Tag readings in `tag_values`. POST / is what the Simulator page uses to act as the gateway; POST /batch is
+// the HTTP gateway channel (see Gateway settings), authenticated by a user or the gateway API key.
 
 export const tagValuesRouter = Router();
-
-/** Tags registered on any machine, and which of them must hold numbers. */
-async function registeredTags() {
-  const machines = await machineStore.list();
-  const all = new Set<string>();
-  const numeric = new Set<string>();
-  for (const m of machines) {
-    [m.tagStatus, m.tagOutput, m.tagReject].forEach((t) => (all.add(t), numeric.add(t)));
-    all.add(m.tagProduct);
-    m.monitoringTags.forEach((t) => (all.add(t.tagName), numeric.add(t.tagName)));
-  }
-  return { all, numeric };
-}
 
 tagValuesRouter.get("/latest", async (_req, res) => {
   const { all } = await registeredTags();
@@ -50,5 +40,11 @@ tagValuesRouter.post("/", async (req, res) => {
     if (Number.isNaN(recordedAt.getTime())) throw new HttpError(400, "Invalid timestamp");
   }
 
-  res.status(201).json(await tagValueStore.insert(tagName, value, recordedAt));
+  res.status(201).json(await tagIngest.recordNow(tagName, value, recordedAt));
+});
+
+/** Gateway batch: one message with many readings (see IngestPayload in types/gateway.ts). */
+tagValuesRouter.post("/batch", async (req, res) => {
+  if (!(await gatewaySettingsStore.get()).http.enabled) throw new HttpError(503, "HTTP ingest is disabled in Gateway settings");
+  res.json(await ingestAndLog("http", req.body, { client: req.ip }));
 });

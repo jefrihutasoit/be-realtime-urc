@@ -19,3 +19,12 @@ settingsRouter.get("/oee", async (_req, res) => {
 settingsRouter.put("/oee", async (req, res) => {
   res.json(await settingsStore.updateOeeSettings(req.body));
 });
+
+/** Theme for every user and the dashboards (`AppearanceSettings`). */
+settingsRouter.get("/appearance", async (_req, res) => {
+  res.json(await settingsStore.getAppearance());
+});
+
+settingsRouter.put("/appearance", async (req, res) => {
+  res.json(await settingsStore.updateAppearance(req.body));
+});

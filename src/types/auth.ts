@@ -25,12 +25,13 @@ export const PERMISSIONS = [
   { key: "shift.manage", group: "Settings", label: "Shift management" },
   { key: "layout.manage", group: "Settings", label: "Layout mapping" },
   { key: "oee.settings", group: "Settings", label: "OEE calculation" },
+  { key: "appearance.manage", group: "Settings", label: "Theme (appearance)" },
   { key: "users.manage", group: "Users", label: "User management & roles" },
 ] as const;
 
 /**
  * Only the Engineering account has these: machine settings, status definition, settings backup & restore,
- * simulator, and database backup / restore / initialize / clear.
+ * simulator, database backup / restore / initialize / clear, and gateway settings.
  */
 export const ENGINEERING_PERMISSIONS = [
   "machines.manage",
@@ -38,6 +39,7 @@ export const ENGINEERING_PERMISSIONS = [
   "backup.manage",
   "simulator.use",
   "database.manage",
+  "gateway.manage",
 ] as const;
 
 export type Permission = (typeof PERMISSIONS)[number]["key"] | (typeof ENGINEERING_PERMISSIONS)[number];

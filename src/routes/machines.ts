@@ -98,6 +98,12 @@ machinesRouter.get("/:id/timeline", async (req, res) => {
   };
 
   const segments: TimelineSegment[] = [];
+  /** Adds a segment, joining it to the previous one when the status is the same (e.g. a zero-length flip). */
+  const push = (seg: TimelineSegment) => {
+    const last = segments.at(-1);
+    if (last && last.status === seg.status && last.end === seg.start) last.end = seg.end;
+    else segments.push(seg);
+  };
   let current: { status: TimelineStatus; start: number } = {
     status: before[0] ? toStatus(before[0].value) : "NO_DATA",
     start: shiftStart.getTime(),
@@ -106,12 +112,10 @@ machinesRouter.get("/:id/timeline", async (req, res) => {
     const status = toStatus(r.value);
     if (status === current.status) continue;
     const at = new Date(r.timestamp).getTime();
-    if (at > current.start) {
-      segments.push({ status: current.status, start: new Date(current.start).toISOString(), end: r.timestamp });
-    }
+    if (at > current.start) push({ status: current.status, start: new Date(current.start).toISOString(), end: r.timestamp });
     current = { status, start: at };
   }
-  segments.push({ status: current.status, start: new Date(current.start).toISOString(), end: now.toISOString() });
+  push({ status: current.status, start: new Date(current.start).toISOString(), end: now.toISOString() });
 
   const totals: Record<TimelineStatus, number> = { RUN: 0, STOP: 0, OFF: 0, NO_DATA: 0 };
   for (const s of segments) totals[s.status] += Math.round((Date.parse(s.end) - Date.parse(s.start)) / 1000);
@@ -129,6 +133,11 @@ machinesRouter.get("/:id/timeline", async (req, res) => {
 
 machinesRouter.post("/", async (req, res) => {
   res.status(201).json(await machineStore.create(req.body));
+});
+
+/** Applies units, realtime mode or adaptive expiry to all machines or the chosen ones. */
+machinesRouter.post(["/bulk", "/units"], async (req, res) => {
+  res.json(await machineStore.bulkUpdate(req.body));
 });
 
 machinesRouter.patch("/:id", async (req, res) => {

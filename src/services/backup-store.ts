@@ -20,8 +20,13 @@ import { layoutStore } from "./layout-store.js";
 import { machineStore, parseMachineInput, PRODUCTION_TAGS } from "./machine-store.js";
 import { forgetMachine } from "./oee-engine.js";
 import { rejectStore } from "./reject-store.js";
-import { parseOeeSettings, parseStatusDefinition, settingsStore } from "./settings-store.js";
+import { APPEARANCE_KEY, parseAppearance, parseOeeSettings, parseStatusDefinition, settingsStore } from "./settings-store.js";
 import { durationOf, loadShifts, overlaps, parseTime, shiftStore } from "./shift-store.js";
+import { gatewayManager } from "./gateway-manager.js";
+import { GATEWAY_SETTINGS_KEY, gatewaySettingsStore, parseGatewaySettings } from "./gateway-settings.js";
+import { systemLog } from "./system-log.js";
+import type { GatewaySettings } from "../types/gateway.js";
+import type { AppearanceSettings } from "../types/system.js";
 import { deletePhoto, parseSkuInput, skuStore } from "./sku-store.js";
 
 // Export and full restore of the system settings: machines with their tags, SKUs (without photos),
@@ -48,6 +53,10 @@ interface Parsed {
   rolePermissions: RolePermissions | null;
   layoutMarkers: BackupLayoutMarker[];
   rejectTypes: BackupRejectType[];
+  gatewaySettings: GatewaySettings | null;
+  appearance: AppearanceSettings | null;
+  /** Machine Nos that are in the backup but failed validation (lower case); their error is already reported. */
+  invalidMachineNos: Set<string>;
 }
 
 interface Current {
@@ -79,6 +88,9 @@ async function parseBackup(body: unknown, errors: string[]): Promise<Parsed> {
     rolePermissions: null,
     layoutMarkers: [],
     rejectTypes: [],
+    gatewaySettings: null,
+    appearance: null,
+    invalidMachineNos: new Set(),
   };
   if (typeof body !== "object" || body === null) {
     errors.push("Invalid backup");
@@ -119,13 +131,18 @@ async function parseBackup(body: unknown, errors: string[]): Promise<Parsed> {
         tagOutput: m.tagOutput!,
         tagReject: m.tagReject!,
         tagProduct: m.tagProduct!,
+        outputUnit: m.outputUnit!,
+        rejectUnit: m.rejectUnit!,
+        realtimeMode: m.realtimeMode!,
+        adaptiveTtlMinutes: m.adaptiveTtlMinutes!,
         isActive: m.isActive!,
         oeeEnabled: m.oeeEnabled!,
         photo,
-        monitoringTags: (m.monitoringTags ?? []).map((t) => ({ name: t.name, tagName: t.tagName })),
+        monitoringTags: (m.monitoringTags ?? []).map((t) => ({ name: t.name, tagName: t.tagName, unit: t.unit })),
       });
     } catch (err) {
       errors.push(`${label}: ${message(err)}`);
+      if (typeof raw.machineNo === "string" && raw.machineNo.trim()) parsed.invalidMachineNos.add(lower(raw.machineNo.trim()));
     }
   }
 
@@ -195,6 +212,22 @@ async function parseBackup(body: unknown, errors: string[]): Promise<Parsed> {
     }
   }
 
+  // Gateway settings and theme (optional: older backups keep the current ones)
+  if (b.gatewaySettings !== undefined && b.gatewaySettings !== null) {
+    try {
+      parsed.gatewaySettings = parseGatewaySettings(b.gatewaySettings, await gatewaySettingsStore.get());
+    } catch (err) {
+      errors.push(`Gateway settings: ${message(err)}`);
+    }
+  }
+  if (b.appearance !== undefined && b.appearance !== null) {
+    try {
+      parsed.appearance = parseAppearance(b.appearance);
+    } catch (err) {
+      errors.push(`Theme: ${message(err)}`);
+    }
+  }
+
   // Layout markers, by machine No
   const placed = new Set<string>();
   for (const [i, raw] of list(b, "layoutMarkers", errors).entries()) {
@@ -202,6 +235,7 @@ async function parseBackup(body: unknown, errors: string[]): Promise<Parsed> {
     const label = `Layout marker ${machineNo ? `"${machineNo}"` : `#${i + 1}`}`;
     const coord = (v: unknown) => typeof v === "number" && Number.isFinite(v) && v >= 0 && v <= 1;
     if (!machineNo) errors.push(`${label}: machine No is required`);
+    else if (parsed.invalidMachineNos.has(lower(machineNo))) continue; // the machine's own error is reported
     else if (!machineNos.has(lower(machineNo))) errors.push(`${label}: machine is not in the backup`);
     else if (placed.has(lower(machineNo))) errors.push(`${label}: machine is placed twice`);
     else if (!coord(raw.x) || !coord(raw.y)) errors.push(`${label}: X and Y must be between 0 and 1`);
@@ -287,7 +321,8 @@ async function check(body: unknown, conn: PoolConnection | typeof pool = pool) {
 
   if (!parsed.machines.length) warnings.push("The backup has no machines");
   if (!parsed.shifts.length) warnings.push("The backup has no shifts; OEE will not reset per shift");
-  if (machines.removed.length) warnings.push(`Machines deleted (not in the backup): ${machines.removed.join(", ")}`);
+  const removedMachines = machines.removed.filter((no) => !parsed.invalidMachineNos.has(lower(no)));
+  if (removedMachines.length) warnings.push(`Machines deleted (not in the backup): ${removedMachines.join(", ")}`);
   if (skus.removed.length) warnings.push(`SKUs deleted (not in the backup): ${skus.removed.join(", ")}`);
   if (shifts.removed.length) warnings.push(`Shifts deleted (not in the backup): ${shifts.removed.join(", ")}`);
   if (keptTypes.length) warnings.push(`Reject types kept because reject data uses them: ${keptTypes.join(", ")}`);
@@ -322,7 +357,11 @@ async function check(body: unknown, conn: PoolConnection | typeof pool = pool) {
       remove: 0,
     },
     types,
+    { section: "Gateway Settings", inBackup: parsed.gatewaySettings ? 1 : 0, add: 0, update: parsed.gatewaySettings ? 1 : 0, remove: 0 },
+    { section: "Theme", inBackup: parsed.appearance ? 1 : 0, add: 0, update: parsed.appearance ? 1 : 0, remove: 0 },
   ].map(({ section, inBackup, add, update, remove }) => ({ section, inBackup, add, update, remove }));
+  if (!parsed.gatewaySettings) warnings.push("The backup has no gateway settings; the current ones are kept");
+  if (!parsed.appearance) warnings.push("The backup has no theme; the current one is kept");
   if (current.hasLayoutMarkers && !parsed.layoutMarkers.length) warnings.push("All machine positions on the layout are cleared");
   if (!parsed.rolePermissions) warnings.push("The backup has no role permissions; the current ones are kept");
 
@@ -333,7 +372,7 @@ async function check(body: unknown, conn: PoolConnection | typeof pool = pool) {
 
 export const backupStore = {
   async export(): Promise<SettingsBackup> {
-    const [machines, skus, shifts, statusDefinition, oeeSettings, rolePermissions, layout, rejectTypes] = await Promise.all([
+    const [machines, skus, shifts, statusDefinition, oeeSettings, rolePermissions, layout, rejectTypes, gatewaySettings, appearance] = await Promise.all([
       machineStore.list(),
       skuStore.list(),
       shiftStore.list(),
@@ -342,6 +381,8 @@ export const backupStore = {
       authStore.rolePermissions(),
       layoutStore.get(),
       rejectStore.listTypes(),
+      gatewaySettingsStore.get(),
+      settingsStore.getAppearance(),
     ]);
     const machineNo = new Map(machines.map((m) => [m.id, m.machineNo]));
     return {
@@ -354,10 +395,14 @@ export const backupStore = {
         tagOutput: m.tagOutput,
         tagReject: m.tagReject,
         tagProduct: m.tagProduct,
+        outputUnit: m.outputUnit,
+        rejectUnit: m.rejectUnit,
+        realtimeMode: m.realtimeMode,
+        adaptiveTtlMinutes: m.adaptiveTtlMinutes,
         isActive: m.isActive,
         oeeEnabled: m.oeeEnabled,
         photo: isPhotoPath(m.photo) ? m.photo : null,
-        monitoringTags: m.monitoringTags.map((t) => ({ name: t.name, tagName: t.tagName })),
+        monitoringTags: m.monitoringTags.map((t) => ({ name: t.name, tagName: t.tagName, unit: t.unit })),
       })),
       skus: skus.map((s) => ({ skuId: s.skuId, productName: s.productName, sku: s.sku, outputPerMinute: s.outputPerMinute })),
       shifts: shifts.map((s) => ({ name: s.name, start: s.start, end: s.end })),
@@ -368,6 +413,8 @@ export const backupStore = {
         machineNo.has(mk.machineId) ? [{ machineNo: machineNo.get(mk.machineId)!, x: mk.x, y: mk.y }] : []
       ),
       rejectTypes: rejectTypes.map((t) => ({ name: t.name, sortOrder: t.sortOrder })),
+      gatewaySettings,
+      appearance,
     };
   },
 
@@ -379,6 +426,7 @@ export const backupStore = {
   async restore(body: unknown): Promise<BackupCheck> {
     const removedMachineIds: string[] = [];
     const removedPhotos: (string | null)[] = [];
+    let restoredGateway = false;
 
     const result = await withTransaction(async (conn) => {
       const { result, parsed, current } = await check(body, conn);
@@ -397,13 +445,14 @@ export const backupStore = {
         const photo = m.photo ?? old?.photo ?? null;
         await conn.query(
           `INSERT INTO machines (id, machine_no, machine_name, tag_status, tag_output, tag_reject, tag_product,
-            photo, is_active, oee_enabled, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          [id, m.machineNo, m.machineName, m.tagStatus, m.tagOutput, m.tagReject, m.tagProduct, photo, m.isActive,
-            m.oeeEnabled, old?.created_at ?? now, now]
+            output_unit, reject_unit, realtime_mode, adaptive_ttl_min, photo, is_active, oee_enabled, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [id, m.machineNo, m.machineName, m.tagStatus, m.tagOutput, m.tagReject, m.tagProduct, m.outputUnit,
+            m.rejectUnit, m.realtimeMode, m.adaptiveTtlMinutes, photo, m.isActive, m.oeeEnabled, old?.created_at ?? now, now]
         );
         if (m.monitoringTags.length) {
-          await conn.query("INSERT INTO machine_monitoring_tags (id, machine_id, name, tag_name, sort_order) VALUES ?", [
-            m.monitoringTags.map((t, i) => [randomUUID(), id, t.name, t.tagName, i]),
+          await conn.query("INSERT INTO machine_monitoring_tags (id, machine_id, name, tag_name, unit, sort_order) VALUES ?", [
+            m.monitoringTags.map((t, i) => [randomUUID(), id, t.name, t.tagName, t.unit, i]),
           ]);
         }
       }
@@ -466,6 +515,8 @@ export const backupStore = {
       await upsert(STATUS_KEY, parsed.statusDefinition);
       await upsert(OEE_KEY, parsed.oeeSettings);
       if (parsed.rolePermissions) await upsert(ROLES_KEY, parsed.rolePermissions);
+      if (parsed.gatewaySettings) await upsert(GATEWAY_SETTINGS_KEY, parsed.gatewaySettings);
+      if (parsed.appearance) await upsert(APPEARANCE_KEY, parsed.appearance);
       const [layoutRows] = await conn.query<RowDataPacket[]>("SELECT setting_value FROM app_settings WHERE setting_key = ?", [
         LAYOUT_KEY,
       ]);
@@ -480,6 +531,9 @@ export const backupStore = {
         markers: parsed.layoutMarkers.map((mk) => ({ machineId: machineIds.get(lower(mk.machineNo))!, x: mk.x, y: mk.y })),
         updatedAt: now.toISOString(),
       });
+      return { result, gatewayRestored: !!parsed.gatewaySettings };
+    }).then(({ result, gatewayRestored }) => {
+      restoredGateway = gatewayRestored;
       return result;
     });
 
@@ -489,6 +543,12 @@ export const backupStore = {
     authStore.clearCache();
     removedMachineIds.forEach(forgetMachine);
     await Promise.all(removedPhotos.map(deletePhoto));
+    if (restoredGateway) {
+      gatewaySettingsStore.forget();
+      // A port that cannot be opened is shown on the Gateway page; the restore itself is done.
+      await gatewayManager.apply(await gatewaySettingsStore.get()).catch((err) => console.error("[gateway]", err));
+    }
+    systemLog.add("SETTINGS_RESTORED", "Settings restored from a backup file");
     return result;
   },
 };

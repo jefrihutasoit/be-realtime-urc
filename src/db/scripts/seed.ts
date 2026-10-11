@@ -14,9 +14,9 @@ const sample = (no: string) => ({
   tagReject: tagOf(no, "REJECT"),
   tagProduct: tagOf(no, "PRODUCT"),
   monitoringTags: [
-    { name: "Speed", tagName: tagOf(no, "SPEED") },
-    { name: "Vertical Seal Temp", tagName: tagOf(no, "TEMP_SEAL_V") },
-    { name: "Horizontal Seal Temp", tagName: tagOf(no, "TEMP_SEAL_H") },
+    { name: "Speed", tagName: tagOf(no, "SPEED"), unit: "ppm" },
+    { name: "Vertical Seal Temp", tagName: tagOf(no, "TEMP_SEAL_V"), unit: "°C" },
+    { name: "Horizontal Seal Temp", tagName: tagOf(no, "TEMP_SEAL_H"), unit: "°C" },
   ],
   photo: "/machines/packing-machine.svg",
   isActive: true,

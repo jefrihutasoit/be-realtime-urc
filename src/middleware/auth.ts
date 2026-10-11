@@ -1,5 +1,7 @@
 import type { RequestHandler } from "express";
+import { dbHealth } from "../db/pool.js";
 import { authStore } from "../services/auth-store.js";
+import { hasGatewayKey } from "../services/gateway-manager.js";
 import type { Me, Permission } from "../types/auth.js";
 
 // The dashboard data can be read without signing in (guest view). Everything else needs a session token
@@ -11,11 +13,14 @@ type Method = "WRITE" | "DELETE" | "ANY";
 const RULES: [Method, RegExp, Permission][] = [
   ["ANY", /^\/backup(\/|$)/, "backup.manage"],
   ["ANY", /^\/database(\/|$)/, "database.manage"],
+  ["ANY", /^\/system\/(database|info|log)(\/|$)/, "database.manage"],
+  ["WRITE", /^\/settings\/appearance$/, "appearance.manage"],
   ["ANY", /^\/users(\/|$)/, "users.manage"],
   ["WRITE", /^\/machines(\/|$)/, "machines.manage"],
   ["WRITE", /^\/settings\/status-definition$/, "status.manage"],
   ["WRITE", /^\/settings\/oee$/, "oee.settings"],
   ["WRITE", /^\/tag-values(\/|$)/, "simulator.use"],
+  ["ANY", /^\/gateway\/(settings|status|messages|publish|mqtt)(\/|$)/, "gateway.manage"],
   ["WRITE", /^\/skus(\/|$)/, "sku.manage"],
   ["WRITE", /^\/shifts(\/|$)/, "shift.manage"],
   ["WRITE", /^\/layout(\/|$)/, "layout.manage"],
@@ -26,7 +31,14 @@ const RULES: [Method, RegExp, Permission][] = [
   ["WRITE", /^\/downtime(\/|$)/, "downtime.submit"],
 ];
 
-const PUBLIC = [/^\/health$/, /^\/auth\/login$/];
+const PUBLIC = [/^\/health$/, /^\/auth\/login$/, /^\/system\/status$/];
+
+/** What works while the database is down (setup mode): own session, and fixing the connection. */
+const SETUP_PATHS = [/^\/auth\/(me|logout)$/, /^\/system\/(database|info|log)(\/|$)/];
+
+/** Users of recently checked session tokens, so an Engineering user stays signed in while the database is down. */
+const knownTokens = new Map<string, Me>();
+const MAX_KNOWN_TOKENS = 500;
 
 /** What the dashboards read; open to guests. */
 const PUBLIC_READ = [
@@ -38,6 +50,8 @@ const PUBLIC_READ = [
   /^\/summary$/,
   // OEE settings carry the machine name shown on the dashboards.
   /^\/settings\/oee$/,
+  // The theme applies to the dashboards too.
+  /^\/settings\/appearance$/,
 ];
 
 const bearer = (header: string | undefined) => /^Bearer\s+(\S+)$/i.exec(header ?? "")?.[1] ?? null;
@@ -48,12 +62,35 @@ export const currentUser = (locals: Record<string, unknown>) => locals.user as M
 export const authenticate: RequestHandler = async (req, res, next) => {
   if (PUBLIC.some((p) => p.test(req.path))) return next();
 
-  // A gateway may push tag readings with a shared key instead of a user session.
-  const gatewayKey = process.env.GATEWAY_API_KEY;
-  if (gatewayKey && req.path.startsWith("/tag-values") && req.get("x-gateway-key") === gatewayKey) return next();
+  // A gateway may push tag readings with its API key (Gateway settings) instead of a user session.
+  if (req.method === "POST" && req.path.startsWith("/tag-values") && hasGatewayKey((n) => req.get(n))) return next();
 
   const token = bearer(req.get("authorization"));
-  const user = token ? await authStore.userOfToken(token) : null;
+
+  if (!dbHealth.ready) {
+    // Setup mode: only an Engineering session may fix the connection; everything else waits for the database.
+    const known = token ? (authStore.setupUser(token) ?? knownTokens.get(token) ?? null) : null;
+    const user = known?.role === "ENGINEERING" ? known : null;
+    if (user && SETUP_PATHS.some((p) => p.test(req.path))) {
+      res.locals.user = user;
+      res.locals.token = token;
+      return next();
+    }
+    res.status(503).json({
+      error: `The database is not connected${dbHealth.error ? `: ${dbHealth.error}` : ""}`,
+      code: "DB_UNAVAILABLE",
+    });
+    return;
+  }
+
+  let user = token ? authStore.setupUser(token) : null;
+  if (token && !user) {
+    user = await authStore.userOfToken(token);
+    if (user) {
+      if (knownTokens.size >= MAX_KNOWN_TOKENS) knownTokens.delete(knownTokens.keys().next().value!);
+      knownTokens.set(token, user);
+    } else knownTokens.delete(token);
+  }
   if (!user && req.method === "GET" && PUBLIC_READ.some((p) => p.test(req.path))) return next();
   if (!user) {
     res.status(401).json({ error: "Please sign in" });

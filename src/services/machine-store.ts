@@ -2,7 +2,14 @@ import { randomUUID } from "node:crypto";
 import type { PoolConnection, ResultSetHeader, RowDataPacket } from "mysql2/promise";
 import { pool, withTransaction } from "../db/pool.js";
 import { HttpError } from "../lib/http-error.js";
-import type { MachineInput, MachineRegistration, MonitoringTag, ProductionTagKey } from "../types/machine.js";
+import type {
+  MachineInput,
+  MachineRegistration,
+  MonitoringTag,
+  ProductionTagKey,
+  ProductionUnitKey,
+  RealtimeMode,
+} from "../types/machine.js";
 
 // Machine registry backed by MySQL (tables `machines` and `machine_monitoring_tags`).
 
@@ -11,6 +18,36 @@ export const PRODUCTION_TAGS: [ProductionTagKey, string][] = [
   ["tagOutput", "Tag output"],
   ["tagReject", "Tag reject"],
   ["tagProduct", "Tag product"],
+];
+
+const PRODUCTION_UNITS: [ProductionUnitKey, string, string][] = [
+  ["outputUnit", "output_unit", "Output unit"],
+  ["rejectUnit", "reject_unit", "Reject unit"],
+];
+const DEFAULT_UNIT = "pcs";
+const REALTIME_MODES: RealtimeMode[] = ["registered", "adaptive"];
+/** Default and limits of the adaptive tag expiry: one 8-hour shift, 1 minute to 7 days. */
+const DEFAULT_TTL_MIN = 480;
+const MAX_TTL_MIN = 7 * 24 * 60;
+
+function parseRealtimeMode(value: unknown): RealtimeMode {
+  if (!REALTIME_MODES.includes(value as RealtimeMode)) throw new HttpError(400, "Realtime mode must be registered or adaptive");
+  return value as RealtimeMode;
+}
+
+function parseTtl(value: unknown): number {
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 1 || value > MAX_TTL_MIN) {
+    throw new HttpError(400, `Adaptive tag expiry must be 1 to ${MAX_TTL_MIN} minutes`);
+  }
+  return value;
+}
+
+/** Fields that can be set on many machines at once: key, column, parser. */
+const BULK_FIELDS: [keyof MachineRegistration, string, (v: unknown) => string | number][] = [
+  ["outputUnit", "output_unit", (v) => parseUnit(v, "Output unit")],
+  ["rejectUnit", "reject_unit", (v) => parseUnit(v, "Reject unit")],
+  ["realtimeMode", "realtime_mode", parseRealtimeMode],
+  ["adaptiveTtlMinutes", "adaptive_ttl_min", parseTtl],
 ];
 
 // Kept under MySQL's default 1 MB max_allowed_packet (XAMPP). The frontend sends ~50 KB JPEGs.
@@ -29,6 +66,10 @@ interface MachineRow extends RowDataPacket {
   tag_output: string;
   tag_reject: string;
   tag_product: string;
+  output_unit: string;
+  reject_unit: string;
+  realtime_mode: RealtimeMode;
+  adaptive_ttl_min: number;
   photo: string | null;
   is_active: number;
   oee_enabled: number;
@@ -41,12 +82,14 @@ interface MonitoringTagRow extends RowDataPacket {
   machine_id: string;
   name: string;
   tag_name: string;
+  unit: string;
 }
 
 // ---------- validation ----------
 
 // Tag names are free text: the gateway tag list is only a suggestion, so any address can be registered.
 const MAX_TAG_LENGTH = 200;
+const MAX_UNIT_LENGTH = 20;
 
 function parseMonitoringTags(value: unknown): MonitoringTag[] {
   if (!Array.isArray(value)) throw new HttpError(400, "Monitoring tags must be a list");
@@ -60,16 +103,28 @@ function parseMonitoringTags(value: unknown): MonitoringTag[] {
     const row = (item ?? {}) as Record<string, unknown>;
     const name = typeof row.name === "string" ? row.name.trim() : "";
     const tagName = typeof row.tagName === "string" ? row.tagName.trim() : "";
+    const unit = typeof row.unit === "string" ? row.unit.trim() : "";
     if (!name || !tagName) throw new HttpError(400, `Monitoring tag #${i + 1}: name and tag name are required`);
     if (name.length > 100) throw new HttpError(400, `Monitoring tag "${name.slice(0, 20)}…": name is too long`);
     if (tagName.length > MAX_TAG_LENGTH) throw new HttpError(400, `Monitoring tag "${name}": tag name is too long`);
+    if (unit.length > MAX_UNIT_LENGTH) {
+      throw new HttpError(400, `Monitoring tag "${name}": unit is too long (max ${MAX_UNIT_LENGTH})`);
+    }
     if (names.has(name.toLowerCase())) throw new HttpError(400, `Monitoring tag name "${name}" is used twice`);
     if (tagNames.has(tagName)) throw new HttpError(400, `Tag ${tagName} is used twice in monitoring tags`);
     names.add(name.toLowerCase());
     tagNames.add(tagName);
-    tags.push({ id: typeof row.id === "string" ? row.id : "", name, tagName });
+    tags.push({ id: typeof row.id === "string" ? row.id : "", name, tagName, unit });
   }
   return tags;
+}
+
+/** A display unit: free text, may be empty (no unit). */
+function parseUnit(value: unknown, label: string): string {
+  if (typeof value !== "string") throw new HttpError(400, `${label} must be text`);
+  const unit = value.trim();
+  if (unit.length > MAX_UNIT_LENGTH) throw new HttpError(400, `${label} is too long (max ${MAX_UNIT_LENGTH})`);
+  return unit;
 }
 
 /** Validates field shapes. With `partial`, only the fields present are checked (PATCH). */
@@ -91,6 +146,18 @@ export async function parseMachineInput(body: unknown, partial = false): Promise
   for (const [key, label] of PRODUCTION_TAGS) {
     if (data[key] && data[key].length > MAX_TAG_LENGTH) throw new HttpError(400, `${label} is too long (max ${MAX_TAG_LENGTH})`);
   }
+
+  for (const [key, , label] of PRODUCTION_UNITS) {
+    // Optional on create (and in older backups): defaults to "pcs".
+    if (key in b) data[key] = parseUnit(b[key], label);
+    else if (!partial) data[key] = DEFAULT_UNIT;
+  }
+
+  // Optional on create (and in older backups).
+  if ("realtimeMode" in b) data.realtimeMode = parseRealtimeMode(b.realtimeMode);
+  else if (!partial) data.realtimeMode = "registered";
+  if ("adaptiveTtlMinutes" in b) data.adaptiveTtlMinutes = parseTtl(b.adaptiveTtlMinutes);
+  else if (!partial) data.adaptiveTtlMinutes = DEFAULT_TTL_MIN;
 
   if (has("monitoringTags")) data.monitoringTags = parseMonitoringTags(b.monitoringTags ?? []);
 
@@ -156,6 +223,10 @@ function toMachine(row: MachineRow, tags: MonitoringTag[]): MachineRegistration 
     tagOutput: row.tag_output,
     tagReject: row.tag_reject,
     tagProduct: row.tag_product,
+    outputUnit: row.output_unit,
+    rejectUnit: row.reject_unit,
+    realtimeMode: row.realtime_mode,
+    adaptiveTtlMinutes: Number(row.adaptive_ttl_min),
     monitoringTags: tags,
     photo: row.photo,
     isActive: !!row.is_active,
@@ -173,13 +244,13 @@ async function loadMachines(conn: PoolConnection | typeof pool, id?: string) {
   if (rows.length === 0) return [];
 
   const [tagRows] = await conn.query<MonitoringTagRow[]>(
-    "SELECT id, machine_id, name, tag_name FROM machine_monitoring_tags WHERE machine_id IN (?) ORDER BY sort_order",
+    "SELECT id, machine_id, name, tag_name, unit FROM machine_monitoring_tags WHERE machine_id IN (?) ORDER BY sort_order",
     [rows.map((r) => r.id)]
   );
   const tagsByMachine = new Map<string, MonitoringTag[]>();
   for (const t of tagRows) {
     const list = tagsByMachine.get(t.machine_id) ?? [];
-    list.push({ id: t.id, name: t.name, tagName: t.tag_name });
+    list.push({ id: t.id, name: t.name, tagName: t.tag_name, unit: t.unit });
     tagsByMachine.set(t.machine_id, list);
   }
 
@@ -193,8 +264,8 @@ async function saveMonitoringTags(conn: PoolConnection, machineId: string, tags:
   await conn.query("DELETE FROM machine_monitoring_tags WHERE machine_id = ?", [machineId]);
   if (tags.length === 0) return [];
   const saved = tags.map((t) => ({ ...t, id: ownIds.has(t.id) ? t.id : randomUUID() }));
-  await conn.query("INSERT INTO machine_monitoring_tags (id, machine_id, name, tag_name, sort_order) VALUES ?", [
-    saved.map((t, i) => [t.id, machineId, t.name, t.tagName, i]),
+  await conn.query("INSERT INTO machine_monitoring_tags (id, machine_id, name, tag_name, unit, sort_order) VALUES ?", [
+    saved.map((t, i) => [t.id, machineId, t.name, t.tagName, t.unit, i]),
   ]);
   return saved;
 }
@@ -226,9 +297,10 @@ export const machineStore = {
       await assertNoConflict(conn, m);
       await conn.query<ResultSetHeader>(
         `INSERT INTO machines (id, machine_no, machine_name, tag_status, tag_output, tag_reject, tag_product,
-          photo, is_active, oee_enabled, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          output_unit, reject_unit, realtime_mode, adaptive_ttl_min, photo, is_active, oee_enabled, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [id, m.machineNo, m.machineName, m.tagStatus, m.tagOutput, m.tagReject, m.tagProduct,
-          m.photo, m.isActive, m.oeeEnabled, now, now]
+          m.outputUnit, m.rejectUnit, m.realtimeMode, m.adaptiveTtlMinutes, m.photo, m.isActive, m.oeeEnabled, now, now]
       );
       await saveMonitoringTags(conn, id, m.monitoringTags, new Set());
       return (await loadMachines(conn, id))[0];
@@ -246,9 +318,10 @@ export const machineStore = {
       await assertNoConflict(conn, m, id);
       await conn.query(
         `UPDATE machines SET machine_no = ?, machine_name = ?, tag_status = ?, tag_output = ?, tag_reject = ?,
-          tag_product = ?, photo = ?, is_active = ?, oee_enabled = ?, updated_at = ? WHERE id = ?`,
+          tag_product = ?, output_unit = ?, reject_unit = ?, realtime_mode = ?, adaptive_ttl_min = ?, photo = ?,
+          is_active = ?, oee_enabled = ?, updated_at = ? WHERE id = ?`,
         [m.machineNo, m.machineName, m.tagStatus, m.tagOutput, m.tagReject, m.tagProduct,
-          m.photo, m.isActive, m.oeeEnabled, new Date(), id]
+          m.outputUnit, m.rejectUnit, m.realtimeMode, m.adaptiveTtlMinutes, m.photo, m.isActive, m.oeeEnabled, new Date(), id]
       );
       if (data.monitoringTags) {
         const ownIds = new Set(current.monitoringTags.map((t) => t.id));
@@ -256,6 +329,28 @@ export const machineStore = {
       }
       return (await loadMachines(conn, id))[0];
     }).catch(mapDbError);
+  },
+
+  /**
+   * Sets some fields on several machines at once (units, realtime mode, adaptive expiry).
+   * Body: `{ machineIds: string[] | "all", outputUnit?, rejectUnit?, realtimeMode?, adaptiveTtlMinutes? }`.
+   */
+  async bulkUpdate(body: unknown) {
+    const b = (typeof body === "object" && body !== null ? body : {}) as Record<string, unknown>;
+    const fields = BULK_FIELDS.filter(([key]) => key in b);
+    if (!fields.length) throw new HttpError(400, "Choose a setting to apply");
+    const values = fields.map(([key, , parse]) => parse(b[key]));
+
+    const all = b.machineIds === "all";
+    const ids = Array.isArray(b.machineIds) ? b.machineIds.filter((v): v is string => typeof v === "string") : [];
+    if (!all && ids.length === 0) throw new HttpError(400, "Choose at least one machine");
+
+    const sets = fields.map(([, column]) => `${column} = ?`).join(", ");
+    const [result] = await pool.query<ResultSetHeader>(
+      `UPDATE machines SET ${sets}, updated_at = ?${all ? "" : " WHERE id IN (?)"}`,
+      all ? [...values, new Date()] : [...values, new Date(), ids]
+    );
+    return { updated: result.affectedRows };
   },
 
   async remove(id: string) {
