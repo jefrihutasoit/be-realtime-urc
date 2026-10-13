@@ -5,7 +5,15 @@ import type { RowDataPacket } from "mysql2/promise";
 import { env } from "../config/env.js";
 import { pool } from "../db/pool.js";
 import { HttpError } from "../lib/http-error.js";
-import type { LayoutMarker, PlantLayout } from "../types/layout.js";
+import {
+  LAYOUT_INDICATORS,
+  MARKER_SIZE_RANGE,
+  type LayoutDisplay,
+  type LayoutIndicator,
+  type LayoutMarker,
+  type LayoutView,
+  type PlantLayout,
+} from "../types/layout.js";
 import { machineStore } from "./machine-store.js";
 
 // The plant layout (one image plus a marker per machine), stored as JSON in `app_settings`.
@@ -25,10 +33,13 @@ export const LAYOUT_IMAGE_TYPES: Record<string, string> = {
 interface StoredLayout {
   imageFile: string | null;
   markers: LayoutMarker[];
+  view: LayoutView | null;
+  indicator: LayoutIndicator;
+  markerSize: number;
   updatedAt: string | null;
 }
 
-const EMPTY: StoredLayout = { imageFile: null, markers: [], updatedAt: null };
+const EMPTY: StoredLayout = { imageFile: null, markers: [], view: null, indicator: "ring", markerSize: 1, updatedAt: null };
 
 async function read(): Promise<StoredLayout> {
   const [rows] = await pool.query<RowDataPacket[]>("SELECT setting_value FROM app_settings WHERE setting_key = ?", [
@@ -59,8 +70,48 @@ async function toLayout(stored: StoredLayout): Promise<PlantLayout> {
   return {
     image: stored.imageFile ? `${LAYOUT_URL}/${stored.imageFile}` : null,
     markers: stored.markers.filter((m) => ids.has(m.machineId)),
+    view: stored.view,
+    indicator: LAYOUT_INDICATORS.includes(stored.indicator) ? stored.indicator : "ring",
+    markerSize: validMarkerSize(stored.markerSize) ? stored.markerSize : 1,
     updatedAt: stored.updatedAt,
   };
+}
+
+const validMarkerSize = (v: unknown): v is number =>
+  typeof v === "number" && Number.isFinite(v) && v >= MARKER_SIZE_RANGE.min && v <= MARKER_SIZE_RANGE.max;
+
+/** `{ position, target }` of three numbers each, or null / undefined for the automatic view. */
+export function parseView(raw: unknown): LayoutView | null {
+  if (raw == null) return null;
+  const v = raw as Record<string, unknown>;
+  const vec = (value: unknown, label: string): [number, number, number] => {
+    if (!Array.isArray(value) || value.length !== 3 || !value.every((n) => typeof n === "number" && Number.isFinite(n) && Math.abs(n) <= 1000)) {
+      throw new HttpError(400, `view.${label} must be three numbers`);
+    }
+    return value.map((n: number) => Math.round(n * 100) / 100) as [number, number, number];
+  };
+  return { position: vec(v.position, "position"), target: vec(v.target, "target") };
+}
+
+export function parseIndicator(raw: unknown): LayoutIndicator {
+  if (!LAYOUT_INDICATORS.includes(raw as LayoutIndicator)) {
+    throw new HttpError(400, `indicator must be one of: ${LAYOUT_INDICATORS.join(", ")}`);
+  }
+  return raw as LayoutIndicator;
+}
+
+export function parseMarkerSize(raw: unknown): number {
+  if (!validMarkerSize(raw)) {
+    throw new HttpError(400, `markerSize must be a number from ${MARKER_SIZE_RANGE.min} to ${MARKER_SIZE_RANGE.max}`);
+  }
+  return Math.round(raw * 100) / 100;
+}
+
+/** The whole display block of a backup; each part is checked. */
+export function parseLayoutDisplay(raw: unknown): LayoutDisplay {
+  if (typeof raw !== "object" || raw === null) throw new HttpError(400, "must be an object");
+  const d = raw as Record<string, unknown>;
+  return { view: parseView(d.view), indicator: parseIndicator(d.indicator ?? "ring"), markerSize: parseMarkerSize(d.markerSize ?? 1) };
 }
 
 async function deleteFile(file: string | null) {
@@ -94,6 +145,30 @@ export const layoutStore = {
     const saved = await write({ ...current, imageFile: null });
     await deleteFile(current.imageFile);
     return toLayout(saved);
+  },
+
+  /** Body `{ view: { position, target } }`, or `{ view: null }` to go back to the automatic view. */
+  async setView(body: unknown) {
+    const view = parseView((body as { view?: unknown } | null)?.view);
+    return toLayout(await write({ ...(await read()), view }));
+  },
+
+  /** Body `{ indicator: "ring" | "led" }`. */
+  async setIndicator(body: unknown) {
+    const indicator = parseIndicator((body as { indicator?: unknown } | null)?.indicator);
+    return toLayout(await write({ ...(await read()), indicator }));
+  },
+
+  /** Body `{ markerSize: number }` within MARKER_SIZE_RANGE. */
+  async setMarkerSize(body: unknown) {
+    const markerSize = parseMarkerSize((body as { markerSize?: unknown } | null)?.markerSize);
+    return toLayout(await write({ ...(await read()), markerSize }));
+  },
+
+  /** View, indicator and marker size, for the settings backup. */
+  async display(): Promise<LayoutDisplay> {
+    const { view, indicator, markerSize } = await this.get();
+    return { view, indicator, markerSize };
   },
 
   async setMarkers(body: unknown) {

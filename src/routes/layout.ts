@@ -21,6 +21,18 @@ layoutRouter.delete("/image", async (_req, res) => {
   res.json(await layoutStore.removeImage());
 });
 
+layoutRouter.put("/view", async (req, res) => {
+  res.json(await layoutStore.setView(req.body));
+});
+
+layoutRouter.put("/indicator", async (req, res) => {
+  res.json(await layoutStore.setIndicator(req.body));
+});
+
+layoutRouter.put("/marker-size", async (req, res) => {
+  res.json(await layoutStore.setMarkerSize(req.body));
+});
+
 layoutRouter.put("/markers", async (req, res) => {
   res.json(await layoutStore.setMarkers(req.body));
 });

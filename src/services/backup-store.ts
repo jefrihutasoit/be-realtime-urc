@@ -16,7 +16,7 @@ import {
 import type { RolePermissions } from "../types/auth.js";
 import { DEFAULT_OEE_SETTINGS, type OeeSettings, type StatusDefinition } from "../types/settings.js";
 import { authStore, parseRolePermissions } from "./auth-store.js";
-import { layoutStore } from "./layout-store.js";
+import { layoutStore, parseLayoutDisplay } from "./layout-store.js";
 import { machineStore, parseMachineInput, PRODUCTION_TAGS } from "./machine-store.js";
 import { forgetMachine } from "./oee-engine.js";
 import { rejectStore } from "./reject-store.js";
@@ -27,10 +27,12 @@ import { GATEWAY_SETTINGS_KEY, gatewaySettingsStore, parseGatewaySettings } from
 import { systemLog } from "./system-log.js";
 import type { GatewaySettings } from "../types/gateway.js";
 import type { AppearanceSettings } from "../types/system.js";
+import type { LayoutDisplay } from "../types/layout.js";
 import { deletePhoto, parseSkuInput, skuStore } from "./sku-store.js";
 
 // Export and full restore of the system settings: machines with their tags, SKUs (without photos),
-// shifts, status definition, OEE settings, role permissions, plant layout markers and reject types.
+// shifts, status definition, OEE settings, role permissions, plant layout markers and display (camera,
+// indicator, marker size), reject types, gateway settings and theme.
 // History and user accounts are never touched.
 // A restore replaces the settings with the backup: records are matched by machine No, SKU ID,
 // shift name and reject type name, so matched records keep their database id (and their history).
@@ -55,6 +57,7 @@ interface Parsed {
   rejectTypes: BackupRejectType[];
   gatewaySettings: GatewaySettings | null;
   appearance: AppearanceSettings | null;
+  layoutDisplay: LayoutDisplay | null;
   /** Machine Nos that are in the backup but failed validation (lower case); their error is already reported. */
   invalidMachineNos: Set<string>;
 }
@@ -90,6 +93,7 @@ async function parseBackup(body: unknown, errors: string[]): Promise<Parsed> {
     rejectTypes: [],
     gatewaySettings: null,
     appearance: null,
+    layoutDisplay: null,
     invalidMachineNos: new Set(),
   };
   if (typeof body !== "object" || body === null) {
@@ -227,6 +231,13 @@ async function parseBackup(body: unknown, errors: string[]): Promise<Parsed> {
       errors.push(`Theme: ${message(err)}`);
     }
   }
+  if (b.layoutDisplay !== undefined) {
+    try {
+      parsed.layoutDisplay = parseLayoutDisplay(b.layoutDisplay);
+    } catch (err) {
+      errors.push(`Layout display: ${message(err)}`);
+    }
+  }
 
   // Layout markers, by machine No
   const placed = new Set<string>();
@@ -359,9 +370,17 @@ async function check(body: unknown, conn: PoolConnection | typeof pool = pool) {
     types,
     { section: "Gateway Settings", inBackup: parsed.gatewaySettings ? 1 : 0, add: 0, update: parsed.gatewaySettings ? 1 : 0, remove: 0 },
     { section: "Theme", inBackup: parsed.appearance ? 1 : 0, add: 0, update: parsed.appearance ? 1 : 0, remove: 0 },
+    {
+      section: "Layout Display",
+      inBackup: parsed.layoutDisplay ? 1 : 0,
+      add: 0,
+      update: parsed.layoutDisplay ? 1 : 0,
+      remove: 0,
+    },
   ].map(({ section, inBackup, add, update, remove }) => ({ section, inBackup, add, update, remove }));
   if (!parsed.gatewaySettings) warnings.push("The backup has no gateway settings; the current ones are kept");
   if (!parsed.appearance) warnings.push("The backup has no theme; the current one is kept");
+  if (!parsed.layoutDisplay) warnings.push("The backup has no layout display settings; the current camera, indicator and marker size are kept");
   if (current.hasLayoutMarkers && !parsed.layoutMarkers.length) warnings.push("All machine positions on the layout are cleared");
   if (!parsed.rolePermissions) warnings.push("The backup has no role permissions; the current ones are kept");
 
@@ -372,7 +391,7 @@ async function check(body: unknown, conn: PoolConnection | typeof pool = pool) {
 
 export const backupStore = {
   async export(): Promise<SettingsBackup> {
-    const [machines, skus, shifts, statusDefinition, oeeSettings, rolePermissions, layout, rejectTypes, gatewaySettings, appearance] = await Promise.all([
+    const [machines, skus, shifts, statusDefinition, oeeSettings, rolePermissions, layout, rejectTypes, gatewaySettings, appearance, layoutDisplay] = await Promise.all([
       machineStore.list(),
       skuStore.list(),
       shiftStore.list(),
@@ -383,6 +402,7 @@ export const backupStore = {
       rejectStore.listTypes(),
       gatewaySettingsStore.get(),
       settingsStore.getAppearance(),
+      layoutStore.display(),
     ]);
     const machineNo = new Map(machines.map((m) => [m.id, m.machineNo]));
     return {
@@ -415,6 +435,7 @@ export const backupStore = {
       rejectTypes: rejectTypes.map((t) => ({ name: t.name, sortOrder: t.sortOrder })),
       gatewaySettings,
       appearance,
+      layoutDisplay,
     };
   },
 
@@ -505,7 +526,8 @@ export const backupStore = {
         if (!keepTypes.has(t.id) && t.used === 0) await conn.query("DELETE FROM reject_types WHERE id = ?", [t.id]);
       }
 
-      // Status definition and layout markers (the layout image stays as it is).
+      // Status definition, layout markers and display (the layout image stays as it is; without display
+      // settings in the backup the current ones stay too).
       const upsert = (key: string, value: unknown) =>
         conn.query(
           `INSERT INTO app_settings (setting_key, setting_value, updated_at) VALUES (?, ?, ?)
@@ -521,13 +543,21 @@ export const backupStore = {
         LAYOUT_KEY,
       ]);
       let imageFile: string | null = null;
+      let view: unknown = null;
+      let indicator: unknown = "ring";
+      let markerSize: unknown = 1;
       try {
-        imageFile = layoutRows[0] ? (JSON.parse(layoutRows[0].setting_value).imageFile ?? null) : null;
+        const current = layoutRows[0] ? JSON.parse(layoutRows[0].setting_value) : {};
+        imageFile = current.imageFile ?? null;
+        view = current.view ?? null;
+        indicator = current.indicator ?? "ring";
+        markerSize = current.markerSize ?? 1;
       } catch {
         // Unreadable layout: start over without an image.
       }
       await upsert(LAYOUT_KEY, {
         imageFile,
+        ...(parsed.layoutDisplay ?? { view, indicator, markerSize }),
         markers: parsed.layoutMarkers.map((mk) => ({ machineId: machineIds.get(lower(mk.machineNo))!, x: mk.x, y: mk.y })),
         updatedAt: now.toISOString(),
       });

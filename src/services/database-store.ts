@@ -1,5 +1,6 @@
 import { once } from "node:events";
-import { readdir, unlink } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { appendFile, mkdir, readdir, readFile, rename, rm, unlink } from "node:fs/promises";
 import path from "node:path";
 import { createInterface } from "node:readline";
 import type { Readable, Writable } from "node:stream";
@@ -30,8 +31,17 @@ import { loadShifts } from "./shift-store.js";
 //   {"type":"rows","table":"machines","rows":[{…},…]}      (up to BATCH rows per line)
 //   {"type":"end","counts":{"machines":40,…}}
 // Dates are written as {"$d":"<ISO>"} and binary values as {"$b":"<base64>"}.
+//
+// A full system backup (format "oee-urc-full") has the same lines plus every uploaded file (SKU photos,
+// layout image, …) before the end line, in pieces of FILE_CHUNK bytes:
+//   {"type":"file","path":"skus/x.jpg","data":"<base64>","append":false}
+// Its restore also replaces the uploaded files.
 
 const FORMAT = "oee-urc-database";
+const FULL_FORMAT = "oee-urc-full";
+const FILE_CHUNK = 512 * 1024;
+/** Upload paths: folders and file names of letters, digits, ".", "_" and "-", without leading dots. */
+const UPLOAD_PATH = /^(?:[A-Za-z0-9_-][A-Za-z0-9._-]*\/)*[A-Za-z0-9_-][A-Za-z0-9._-]*$/;
 
 interface BackupHeader {
   format?: string;
@@ -131,6 +141,34 @@ async function clearUploads() {
   }
 }
 
+/** Uploaded files as paths relative to the upload folder ("skus/x.jpg"); dot files and folders are left out. */
+async function uploadedFiles(dir = env.uploadDir, prefix = ""): Promise<string[]> {
+  const entries = await readdir(dir, { withFileTypes: true }).catch(() => []);
+  const out: string[] = [];
+  for (const e of entries) {
+    if (e.name.startsWith(".")) continue;
+    const rel = prefix ? `${prefix}/${e.name}` : e.name;
+    if (e.isDirectory()) out.push(...(await uploadedFiles(path.join(dir, e.name), rel)));
+    else if (e.isFile()) out.push(rel);
+  }
+  return out;
+}
+
+/** Replaces the uploaded files with the ones restored into `staging`, then removes `staging`. */
+async function swapUploads(staging: string, files: string[]) {
+  const folders = new Set(["skus", "layout", ...files.map((f) => f.split("/")[0])]);
+  for (const folder of folders) {
+    await rm(path.join(env.uploadDir, folder), { recursive: true, force: true });
+  }
+  // Files directly in the upload folder are replaced one by one.
+  for (const f of files) {
+    const target = path.join(env.uploadDir, f);
+    await mkdir(path.dirname(target), { recursive: true });
+    await rename(path.join(staging, f), target);
+  }
+  await rm(staging, { recursive: true, force: true });
+}
+
 export const databaseStore = {
   async stats() {
     const names = await tableNames();
@@ -157,8 +195,11 @@ export const databaseStore = {
     };
   },
 
-  /** Streams the backup into `out` (gzip of JSON lines). Tables are read one by one, row by row. */
-  async backup(out: Writable) {
+  /**
+   * Streams the backup into `out` (gzip of JSON lines). Tables are read one by one, row by row.
+   * `full` adds every uploaded file (full system backup).
+   */
+  async backup(out: Writable, full = false) {
     // Save the live OEE figures first so the backup has them.
     await oeeStateStore.save().catch(() => {});
     await oeeHistoryStore.flush().catch(() => {});
@@ -172,7 +213,7 @@ export const databaseStore = {
       const tables = (await tableNames(conn)).filter((t) => !SKIP_TABLES.includes(t));
       await write({
         type: "header",
-        format: FORMAT,
+        format: full ? FULL_FORMAT : FORMAT,
         version: VERSION,
         exportedAt: new Date().toISOString(),
         database: dbConfig().database,
@@ -196,7 +237,18 @@ export const databaseStore = {
         }
         if (batch.length) await write({ type: "rows", table, rows: batch });
       }
-      await write({ type: "end", counts });
+      let files = 0;
+      if (full) {
+        for (const rel of await uploadedFiles()) {
+          const data = await readFile(path.join(env.uploadDir, rel)).catch(() => null);
+          if (!data) continue;
+          for (let at = 0; at === 0 || at < data.length; at += FILE_CHUNK) {
+            await write({ type: "file", path: rel, data: data.subarray(at, at + FILE_CHUNK).toString("base64"), append: at > 0 });
+          }
+          files += 1;
+        }
+      }
+      await write({ type: "end", counts, ...(full ? { files } : {}) });
     } finally {
       conn.release();
       gzip.end();
@@ -206,7 +258,8 @@ export const databaseStore = {
 
   /**
    * Replaces every table with the backup in `input` (gzip of JSON lines), in one transaction.
-   * The backup must come from the same schema version (same migrations).
+   * The backup must come from the same schema version (same migrations). A full system backup also
+   * replaces the uploaded files, once the database part is committed.
    */
   async restore(input: Readable) {
     return withPollerPaused(async () => {
@@ -214,6 +267,9 @@ export const databaseStore = {
       const counts: Record<string, number> = {};
       let header: BackupHeader | null = null;
       let ended = false;
+      const staging = path.join(env.uploadDir, `.restore-${randomUUID()}`);
+      const stagedFiles = new Set<string>();
+      let committed = false;
       try {
         await conn.query("SET FOREIGN_KEY_CHECKS = 0");
         await conn.beginTransaction();
@@ -237,7 +293,9 @@ export const databaseStore = {
               throw new HttpError(400, "The file is not a database backup (unreadable line)");
             }
             if (!header) {
-              if (item.type !== "header" || item.format !== FORMAT) throw new HttpError(400, "The file is not an OEE database backup");
+              if (item.type !== "header" || (item.format !== FORMAT && item.format !== FULL_FORMAT)) {
+                throw new HttpError(400, "The file is not an OEE database or full system backup");
+              }
               header = item as unknown as BackupHeader;
               const mine = await migrationIds(conn);
               const theirs = header.migrations ?? [];
@@ -257,6 +315,19 @@ export const databaseStore = {
               ended = true;
               break;
             }
+            if (item.type === "file") {
+              if (header.format !== FULL_FORMAT) continue;
+              const rel = typeof item.path === "string" ? item.path : "";
+              if (!UPLOAD_PATH.test(rel) || typeof item.data !== "string") {
+                throw new HttpError(400, `The backup has an invalid file entry "${rel}"`);
+              }
+              const target = path.join(staging, rel);
+              await mkdir(path.dirname(target), { recursive: true });
+              if (!item.append) await rm(target, { force: true });
+              await appendFile(target, Buffer.from(item.data, "base64"));
+              stagedFiles.add(rel);
+              continue;
+            }
             if (item.type !== "rows" || !item.table || !Array.isArray(item.rows) || !item.rows.length) continue;
             if (!current.has(item.table) || SKIP_TABLES.includes(item.table)) continue;
             const rows = item.rows.map(decode);
@@ -275,11 +346,13 @@ export const databaseStore = {
             "DELETE s FROM user_sessions s LEFT JOIN users u ON u.id = s.user_id WHERE u.id IS NULL OR u.is_active = 0"
           );
           await conn.commit();
+          committed = true;
         } catch (err) {
           await conn.rollback();
           throw err;
         }
       } catch (err) {
+        await rm(staging, { recursive: true, force: true }).catch(() => {});
         if (err instanceof HttpError) throw err;
         if ((err as { code?: string }).code === "Z_DATA_ERROR") throw new HttpError(400, "The file is not a gzip database backup");
         throw err;
@@ -288,8 +361,15 @@ export const databaseStore = {
         conn.release();
         input.resume();
       }
-      await reloadState("Database restored from a backup file");
-      return { exportedAt: (header as BackupHeader | null)?.exportedAt ?? null, tables: counts };
+      const full = committed && (header as BackupHeader | null)?.format === FULL_FORMAT;
+      if (full) await swapUploads(staging, [...stagedFiles]);
+      await reloadState(full ? "Full system restored from a backup file" : "Database restored from a backup file");
+      return {
+        exportedAt: (header as BackupHeader | null)?.exportedAt ?? null,
+        tables: counts,
+        full,
+        files: full ? stagedFiles.size : 0,
+      };
     });
   },
 
