@@ -9,9 +9,12 @@ import type {
   ProductionTagKey,
   ProductionUnitKey,
   RealtimeMode,
+  ScaleConfig,
 } from "../types/machine.js";
+import { YAMATO_FIELD_BY_KEY } from "./yamato/fields.js";
 
-// Machine registry backed by MySQL (tables `machines` and `machine_monitoring_tags`).
+// Machine registry backed by MySQL (tables `machines` and `machine_monitoring_tags`; the Yamato scale
+// settings are a JSON text in `machines.scale_config`).
 
 export const PRODUCTION_TAGS: [ProductionTagKey, string][] = [
   ["tagStatus", "Tag status"],
@@ -66,10 +69,12 @@ interface MachineRow extends RowDataPacket {
   tag_output: string;
   tag_reject: string;
   tag_product: string;
+  tag_speed: string;
   output_unit: string;
   reject_unit: string;
   realtime_mode: RealtimeMode;
   adaptive_ttl_min: number;
+  scale_config: string | null;
   photo: string | null;
   is_active: number;
   oee_enabled: number;
@@ -119,6 +124,39 @@ function parseMonitoringTags(value: unknown): MonitoringTag[] {
   return tags;
 }
 
+const MC_SIDES = ["1", "2"];
+
+/** Yamato scale settings; null removes the scale. Host and port are only required while it is enabled. */
+function parseScale(value: unknown): ScaleConfig | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value !== "object") throw new HttpError(400, "Scale settings are invalid");
+  const v = value as Record<string, unknown>;
+  const enabled = v.enabled === true;
+  const host = typeof v.host === "string" ? v.host.trim() : "";
+  const port = Number(v.port);
+  const mcSide = typeof v.mcSide === "string" && v.mcSide ? v.mcSide : "1";
+  const fields = Array.isArray(v.fields) ? [...new Set(v.fields.filter((f): f is string => typeof f === "string"))] : [];
+  if (host.length > 100 || /\s/.test(host)) throw new HttpError(400, "Scale host is invalid");
+  if (!MC_SIDES.includes(mcSide)) throw new HttpError(400, "Scale machine side must be 1 or 2");
+  const unknown = fields.find((f) => !YAMATO_FIELD_BY_KEY.has(f));
+  if (unknown) throw new HttpError(400, `Unknown scale field ${unknown}`);
+  if (enabled) {
+    if (!host) throw new HttpError(400, "Scale host is required");
+    if (!Number.isInteger(port) || port < 1 || port > 65535) throw new HttpError(400, "Scale port must be 1 to 65535");
+    if (!fields.length) throw new HttpError(400, "Choose at least one scale field");
+  }
+  return { enabled, host, port: Number.isInteger(port) && port > 0 && port <= 65535 ? port : 10001, mcSide, fields };
+}
+
+function scaleFromRow(text: string | null): ScaleConfig | null {
+  if (!text) return null;
+  try {
+    return parseScale(JSON.parse(text));
+  } catch {
+    return null;
+  }
+}
+
 /** A display unit: free text, may be empty (no unit). */
 function parseUnit(value: unknown, label: string): string {
   if (typeof value !== "string") throw new HttpError(400, `${label} must be text`);
@@ -153,6 +191,13 @@ export async function parseMachineInput(body: unknown, partial = false): Promise
     else if (!partial) data[key] = DEFAULT_UNIT;
   }
 
+  // Optional: a machine without a speed tag shows no speed.
+  if ("tagSpeed" in b) {
+    if (typeof b.tagSpeed !== "string") throw new HttpError(400, "Tag speed must be text");
+    data.tagSpeed = b.tagSpeed.trim();
+    if (data.tagSpeed.length > MAX_TAG_LENGTH) throw new HttpError(400, `Tag speed is too long (max ${MAX_TAG_LENGTH})`);
+  } else if (!partial) data.tagSpeed = "";
+
   // Optional on create (and in older backups).
   if ("realtimeMode" in b) data.realtimeMode = parseRealtimeMode(b.realtimeMode);
   else if (!partial) data.realtimeMode = "registered";
@@ -160,6 +205,9 @@ export async function parseMachineInput(body: unknown, partial = false): Promise
   else if (!partial) data.adaptiveTtlMinutes = DEFAULT_TTL_MIN;
 
   if (has("monitoringTags")) data.monitoringTags = parseMonitoringTags(b.monitoringTags ?? []);
+  // Optional everywhere: older clients and backups do not send it.
+  if ("scale" in b) data.scale = parseScale(b.scale);
+  else if (!partial) data.scale = null;
 
   if (has("photo")) {
     const v = b.photo ?? null;
@@ -223,11 +271,13 @@ function toMachine(row: MachineRow, tags: MonitoringTag[]): MachineRegistration 
     tagOutput: row.tag_output,
     tagReject: row.tag_reject,
     tagProduct: row.tag_product,
+    tagSpeed: row.tag_speed ?? "",
     outputUnit: row.output_unit,
     rejectUnit: row.reject_unit,
     realtimeMode: row.realtime_mode,
     adaptiveTtlMinutes: Number(row.adaptive_ttl_min),
     monitoringTags: tags,
+    scale: scaleFromRow(row.scale_config),
     photo: row.photo,
     isActive: !!row.is_active,
     oeeEnabled: !!row.oee_enabled,
@@ -296,11 +346,13 @@ export const machineStore = {
     return withTransaction(async (conn) => {
       await assertNoConflict(conn, m);
       await conn.query<ResultSetHeader>(
-        `INSERT INTO machines (id, machine_no, machine_name, tag_status, tag_output, tag_reject, tag_product,
-          output_unit, reject_unit, realtime_mode, adaptive_ttl_min, photo, is_active, oee_enabled, created_at, updated_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [id, m.machineNo, m.machineName, m.tagStatus, m.tagOutput, m.tagReject, m.tagProduct,
-          m.outputUnit, m.rejectUnit, m.realtimeMode, m.adaptiveTtlMinutes, m.photo, m.isActive, m.oeeEnabled, now, now]
+        `INSERT INTO machines (id, machine_no, machine_name, tag_status, tag_output, tag_reject, tag_product, tag_speed,
+          output_unit, reject_unit, realtime_mode, adaptive_ttl_min, scale_config, photo, is_active, oee_enabled,
+          created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [id, m.machineNo, m.machineName, m.tagStatus, m.tagOutput, m.tagReject, m.tagProduct, m.tagSpeed,
+          m.outputUnit, m.rejectUnit, m.realtimeMode, m.adaptiveTtlMinutes, m.scale ? JSON.stringify(m.scale) : null,
+          m.photo, m.isActive, m.oeeEnabled, now, now]
       );
       await saveMonitoringTags(conn, id, m.monitoringTags, new Set());
       return (await loadMachines(conn, id))[0];
@@ -318,10 +370,11 @@ export const machineStore = {
       await assertNoConflict(conn, m, id);
       await conn.query(
         `UPDATE machines SET machine_no = ?, machine_name = ?, tag_status = ?, tag_output = ?, tag_reject = ?,
-          tag_product = ?, output_unit = ?, reject_unit = ?, realtime_mode = ?, adaptive_ttl_min = ?, photo = ?,
-          is_active = ?, oee_enabled = ?, updated_at = ? WHERE id = ?`,
-        [m.machineNo, m.machineName, m.tagStatus, m.tagOutput, m.tagReject, m.tagProduct,
-          m.outputUnit, m.rejectUnit, m.realtimeMode, m.adaptiveTtlMinutes, m.photo, m.isActive, m.oeeEnabled, new Date(), id]
+          tag_product = ?, tag_speed = ?, output_unit = ?, reject_unit = ?, realtime_mode = ?, adaptive_ttl_min = ?, scale_config = ?,
+          photo = ?, is_active = ?, oee_enabled = ?, updated_at = ? WHERE id = ?`,
+        [m.machineNo, m.machineName, m.tagStatus, m.tagOutput, m.tagReject, m.tagProduct, m.tagSpeed,
+          m.outputUnit, m.rejectUnit, m.realtimeMode, m.adaptiveTtlMinutes, m.scale ? JSON.stringify(m.scale) : null,
+          m.photo, m.isActive, m.oeeEnabled, new Date(), id]
       );
       if (data.monitoringTags) {
         const ownIds = new Set(current.monitoringTags.map((t) => t.id));

@@ -2,17 +2,19 @@ import type { RowDataPacket } from "mysql2/promise";
 import { pool } from "../db/pool.js";
 import { HttpError } from "../lib/http-error.js";
 import type { DailySummary, OeeFigures } from "../types/summary.js";
-import { downtimeStore } from "./downtime-store.js";
 import { machineStore } from "./machine-store.js";
 import { oeeHistoryStore, type HourlyRow } from "./oee-history-store.js";
 import { settingsStore } from "./settings-store.js";
 import { shiftDefs } from "./shift-store.js";
 
-// Daily summary for the dashboard, built in one request from the hourly OEE figures, reject input
-// and uploaded downtime of one production date.
+// Summary for the dashboard, built in one request from the hourly OEE figures, reject input and
+// uploaded downtime of a range of production dates.
 
 const HOUR = 3_600_000;
+const DAY = 24 * HOUR;
 const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
+/** Longest range one summary covers. */
+const MAX_DAYS = 366;
 
 const round1 = (v: number) => Math.round(v * 10) / 10;
 
@@ -44,44 +46,76 @@ export function dayStartOf(date: string) {
   return new Date(y, m - 1, d, 0, shiftDefs().length ? first : 0);
 }
 
+function parseDate(value: string, name: string) {
+  if (!DATE_PATTERN.test(value) || Number.isNaN(Date.parse(value))) throw new HttpError(400, `${name} must be YYYY-MM-DD`);
+  return value;
+}
+
+/** Production dates from `from` to `to`, inclusive; stops once past MAX_DAYS. */
+function datesBetween(from: string, to: string) {
+  const pad = (n: number) => String(n).padStart(2, "0");
+  const [y, m, d] = from.split("-").map(Number);
+  const dates: string[] = [];
+  for (let day = new Date(y, m - 1, d); dates.length <= MAX_DAYS; day.setDate(day.getDate() + 1)) {
+    const ymd = `${day.getFullYear()}-${pad(day.getMonth() + 1)}-${pad(day.getDate())}`;
+    if (ymd > to) break;
+    dates.push(ymd);
+  }
+  return dates;
+}
+
 export const summaryStore = {
-  async daily(date: string): Promise<DailySummary> {
-    if (!DATE_PATTERN.test(date) || Number.isNaN(Date.parse(date))) throw new HttpError(400, "date must be YYYY-MM-DD");
-    const dayStart = dayStartOf(date);
-    const dayEnd = new Date(dayStart.getTime() + 24 * HOUR);
+  /** Summary of the production dates `from` to `to`: per hour for one day, per day for longer ranges. */
+  async range(fromValue: string, toValue: string): Promise<DailySummary> {
+    const from = parseDate(fromValue, "from");
+    const to = parseDate(toValue, "to");
+    if (from > to) throw new HttpError(400, "from must not be after to");
+    const dates = datesBetween(from, to);
+    if (dates.length > MAX_DAYS) throw new HttpError(400, `A summary covers at most ${MAX_DAYS} days`);
+    const dayStart = dayStartOf(from);
+    const dayEnd = new Date(dayStartOf(to).getTime() + DAY);
+    const bucketMs = dates.length === 1 ? HOUR : DAY;
 
     // Include what the engine counted since its last save.
     if (Date.now() >= dayStart.getTime() && Date.now() < dayEnd.getTime() + HOUR) {
       await oeeHistoryStore.flush().catch((err) => console.warn("[summary] could not save hourly OEE:", err));
     }
 
-    const [allMachines, settings, hourly, rejectRows, typeRows, downtime] = await Promise.all([
+    const [allMachines, settings, hourly, rejectRows, typeRows, downtimeRows] = await Promise.all([
       machineStore.list(),
       settingsStore.getOeeSettings(),
       oeeHistoryStore.between(dayStart, dayEnd),
       pool.query<RowDataPacket[]>(
-        `SELECT r.machine_id, r.shift_id, SUM(i.quantity) AS qty FROM reject_records r
-          JOIN reject_record_items i ON i.record_id = r.id WHERE r.production_date = ?
-          GROUP BY r.machine_id, r.shift_id`,
-        [date]
+        `SELECT DATE_FORMAT(r.production_date, '%Y-%m-%d') AS production_date, r.machine_id, r.shift_id,
+            SUM(i.quantity) AS qty FROM reject_records r
+          JOIN reject_record_items i ON i.record_id = r.id WHERE r.production_date BETWEEN ? AND ?
+          GROUP BY r.production_date, r.machine_id, r.shift_id`,
+        [from, to]
       ),
       pool.query<RowDataPacket[]>(
         `SELECT t.name, SUM(i.quantity) AS qty FROM reject_records r
           JOIN reject_record_items i ON i.record_id = r.id JOIN reject_types t ON t.id = i.reject_type_id
-          WHERE r.production_date = ? GROUP BY t.id, t.name ORDER BY qty DESC`,
-        [date]
+          WHERE r.production_date BETWEEN ? AND ? GROUP BY t.id, t.name ORDER BY qty DESC`,
+        [from, to]
       ),
-      downtimeStore.list(date),
+      pool.query<RowDataPacket[]>(
+        `SELECT COALESCE(NULLIF(downtime_type, ''), 'Other') AS type, SUM(COALESCE(duration_seconds, 0)) AS seconds,
+            COUNT(*) AS count FROM downtime_records WHERE production_date BETWEEN ? AND ? GROUP BY type`,
+        [from, to]
+      ),
     ]);
     const machines = allMachines.filter((m) => m.isActive);
     const useTag = settings.rejectSource !== "input";
     const useInput = settings.rejectSource !== "tag";
     const inputRows = useInput ? rejectRows[0] : [];
 
-    // ---- per hour (all machines)
-    const hours = Array.from({ length: 24 }, (_, i) => dayStart.getTime() + i * HOUR);
+    // ---- per trend point (all machines)
+    const buckets = Array.from(
+      { length: Math.round((dayEnd.getTime() - dayStart.getTime()) / bucketMs) },
+      (_, i) => dayStart.getTime() + i * bucketMs
+    );
     const empty = (): Totals => ({ countedMs: 0, runMs: 0, idealOutput: 0, output: 0, reject: 0 });
-    const perHour = hours.map(empty);
+    const perBucket = buckets.map(empty);
     const perMachine = new Map<string, Totals>();
     const statusMs = { RUN: 0, STOP: 0, OFF: 0 };
     let stopMs = 0;
@@ -93,34 +127,37 @@ export const summaryStore = {
       if (useTag) t.reject += r.rejectTag;
     };
     for (const r of hourly) {
-      const i = Math.floor((r.hourStart - dayStart.getTime()) / HOUR);
-      if (i < 0 || i > 23) continue;
-      add(perHour[i], r);
+      const i = Math.floor((r.hourStart - dayStart.getTime()) / bucketMs);
+      if (i < 0 || i >= buckets.length) continue;
+      add(perBucket[i], r);
       if (!perMachine.has(r.machineId)) perMachine.set(r.machineId, empty());
       add(perMachine.get(r.machineId)!, r);
       stopMs += r.stopMs;
       for (const st of ["RUN", "STOP", "OFF"] as const) statusMs[st] += r.statusMs[st];
     }
 
-    // ---- reject input: per machine, and spread over the hours of its shift by output
+    // ---- reject input: per machine, and spread over the points of its shift by output
     let rejectInput = 0;
-    const inputByShift = new Map<string, number>();
+    const inputByShift = new Map<string, { date: string; shiftId: string; qty: number }>();
     for (const r of inputRows) {
       const qty = Number(r.qty);
       rejectInput += qty;
       if (!perMachine.has(r.machine_id)) perMachine.set(r.machine_id, empty());
       perMachine.get(r.machine_id)!.reject += qty;
-      inputByShift.set(r.shift_id, (inputByShift.get(r.shift_id) ?? 0) + qty);
+      const key = `${r.production_date}|${r.shift_id}`;
+      const e = inputByShift.get(key) ?? { date: r.production_date, shiftId: r.shift_id, qty: 0 };
+      e.qty += qty;
+      inputByShift.set(key, e);
     }
-    for (const [shiftId, qty] of inputByShift) {
+    for (const { date, shiftId, qty } of inputByShift.values()) {
       const def = shiftDefs().find((s) => s.id === shiftId);
       const [y, m, d] = date.split("-").map(Number);
-      const from = def ? new Date(y, m - 1, d, 0, def.start).getTime() : dayStart.getTime();
-      const to = def ? from + def.duration * 60_000 : dayEnd.getTime();
-      const idx = hours.map((h, i) => (h + HOUR > from && h < to ? i : -1)).filter((i) => i >= 0);
+      const start = def ? new Date(y, m - 1, d, 0, def.start).getTime() : dayStartOf(date).getTime();
+      const end = def ? start + def.duration * 60_000 : start + DAY;
+      const idx = buckets.map((b, i) => (b + bucketMs > start && b < end ? i : -1)).filter((i) => i >= 0);
       if (!idx.length) continue;
-      const output = idx.reduce((sum, i) => sum + perHour[i].output, 0);
-      for (const i of idx) perHour[i].reject += output > 0 ? (qty * perHour[i].output) / output : qty / idx.length;
+      const output = idx.reduce((sum, i) => sum + perBucket[i].output, 0);
+      for (const i of idx) perBucket[i].reject += output > 0 ? (qty * perBucket[i].output) / output : qty / idx.length;
     }
 
     // ---- per machine
@@ -141,21 +178,18 @@ export const summaryStore = {
     const avg = (key: keyof OeeFigures) =>
       counted.length ? round1(counted.reduce((s, f) => s + (f[key] ?? 0), 0) / counted.length) : null;
 
-    const output = perHour.reduce((s, t) => s + t.output, 0);
+    const output = perBucket.reduce((s, t) => s + t.output, 0);
     const rejectTag = useTag ? hourly.reduce((s, r) => s + r.rejectTag, 0) : 0;
 
     // ---- uploaded downtime
-    const byType = new Map<string, { type: string; seconds: number; count: number }>();
-    for (const r of downtime) {
-      const type = r.downtimeType || "Other";
-      const t = byType.get(type) ?? { type, seconds: 0, count: 0 };
-      t.seconds += r.durationSeconds ?? 0;
-      t.count += 1;
-      byType.set(type, t);
-    }
+    const byType = downtimeRows[0]
+      .map((r) => ({ type: String(r.type), seconds: Number(r.seconds), count: Number(r.count) }))
+      .sort((a, b) => b.seconds - a.seconds);
 
     return {
-      date,
+      from,
+      to,
+      days: dates.length,
       dayStart: dayStart.toISOString(),
       dayEnd: dayEnd.toISOString(),
       generatedAt: new Date().toISOString(),
@@ -171,8 +205,9 @@ export const summaryStore = {
       reject: Math.round(rejectTag + rejectInput),
       rejectTag: Math.round(rejectTag),
       rejectInput,
-      hourly: perHour.map((t, i) => ({
-        hour: new Date(hours[i]).toISOString(),
+      bucket: bucketMs === HOUR ? "hour" : "day",
+      trend: perBucket.map((t, i) => ({
+        start: new Date(buckets[i]).toISOString(),
         oee: figures(t).oee,
         output: Math.round(t.output),
         reject: Math.round(t.reject),
@@ -186,8 +221,8 @@ export const summaryStore = {
         OFF: Math.round(statusMs.OFF / 1000),
       },
       downtime: {
-        totalSeconds: [...byType.values()].reduce((s, t) => s + t.seconds, 0),
-        byType: [...byType.values()].sort((a, b) => b.seconds - a.seconds),
+        totalSeconds: byType.reduce((s, t) => s + t.seconds, 0),
+        byType,
       },
     };
   },

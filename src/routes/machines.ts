@@ -5,6 +5,8 @@ import { forgetMachine } from "../services/oee-engine.js";
 import { resolveStatus, settingsStore } from "../services/settings-store.js";
 import { tagValueStore } from "../services/tag-value-store.js";
 import { shiftPeriodAt } from "../services/shift-store.js";
+import { statusSegments, trendStore } from "../services/trend-store.js";
+import { scaleManager } from "../services/yamato/scale-manager.js";
 import type {
   MachineHistory,
   MachineStatus,
@@ -39,6 +41,16 @@ function counterLog(readings: TagReading[], type: ProductionLogEntry["type"], li
 
 machinesRouter.get("/", async (_req, res) => {
   res.json(await machineStore.list());
+});
+
+/** Connection state of the Yamato scales being polled. */
+machinesRouter.get("/scales/status", (_req, res) => {
+  res.json(scaleManager.status());
+});
+
+/** `{ host, port, mcSide }`: reads DS from a scale once and returns the raw payload and every field. */
+machinesRouter.post("/scales/test", async (req, res) => {
+  res.json(await scaleManager.test(req.body));
 });
 
 machinesRouter.get("/:id", async (req, res) => {
@@ -78,44 +90,12 @@ machinesRouter.get("/:id/history", async (req, res) => {
   res.json(history);
 });
 
-/**
- * Status timeline of the current shift, built from the status tag's recorded timestamps.
- * Before the first reading the status is the last value recorded before the shift, or NO_DATA when there is none.
- */
+/** Status timeline of the current shift (see statusSegments). */
 machinesRouter.get("/:id/timeline", async (req, res) => {
   const machine = await getMachine(req.params.id);
   const now = new Date();
   const shift = shiftPeriodAt(now);
-  const shiftStart = new Date(shift.start);
-  const [before, readings, statusDefinition] = await Promise.all([
-    tagValueStore.latestBefore([machine.tagStatus], shiftStart),
-    tagValueStore.between(machine.tagStatus, shiftStart, now),
-    settingsStore.getStatusDefinition(),
-  ]);
-  const toStatus = (value: string | undefined): MachineStatus => {
-    const n = value === undefined ? NaN : Number(value);
-    return resolveStatus(Number.isFinite(n) ? n : null, statusDefinition);
-  };
-
-  const segments: TimelineSegment[] = [];
-  /** Adds a segment, joining it to the previous one when the status is the same (e.g. a zero-length flip). */
-  const push = (seg: TimelineSegment) => {
-    const last = segments.at(-1);
-    if (last && last.status === seg.status && last.end === seg.start) last.end = seg.end;
-    else segments.push(seg);
-  };
-  let current: { status: TimelineStatus; start: number } = {
-    status: before[0] ? toStatus(before[0].value) : "NO_DATA",
-    start: shiftStart.getTime(),
-  };
-  for (const r of readings) {
-    const status = toStatus(r.value);
-    if (status === current.status) continue;
-    const at = new Date(r.timestamp).getTime();
-    if (at > current.start) push({ status: current.status, start: new Date(current.start).toISOString(), end: r.timestamp });
-    current = { status, start: at };
-  }
-  push({ status: current.status, start: new Date(current.start).toISOString(), end: now.toISOString() });
+  const segments = await statusSegments(machine.tagStatus, new Date(shift.start), now);
 
   const totals: Record<TimelineStatus, number> = { RUN: 0, STOP: 0, OFF: 0, NO_DATA: 0 };
   for (const s of segments) totals[s.status] += Math.round((Date.parse(s.end) - Date.parse(s.start)) / 1000);
@@ -129,6 +109,11 @@ machinesRouter.get("/:id/timeline", async (req, res) => {
     totals,
   };
   res.json(timeline);
+});
+
+/** `?from=&to=` (ISO times): output / reject counters, monitoring tags and status over that range. */
+machinesRouter.get("/:id/trend", async (req, res) => {
+  res.json(await trendStore.trend(await getMachine(req.params.id), req.query.from, req.query.to));
 });
 
 machinesRouter.post("/", async (req, res) => {

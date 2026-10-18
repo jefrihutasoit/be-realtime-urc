@@ -388,6 +388,7 @@ export function updateOee(machine: MachineRegistration, sample: Sample, ctx: Sam
     stopSeconds: Math.floor(current.stopMs / 1000),
     stopCount: current.stopCount,
     sku: ctx.sku,
+    speed: null,
     updatedAt: new Date(now).toISOString(),
   };
 }
@@ -404,6 +405,7 @@ export function statusOnly(machine: MachineRegistration, status: MachineStatus, 
     oee: 0,
     status,
     oeeEnabled: false,
+    speed: null,
     counting: false,
     waitingFor: null,
     runState: "WAITING",

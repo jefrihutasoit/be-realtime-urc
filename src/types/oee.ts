@@ -25,6 +25,16 @@ export interface Sku {
  */
 export type OeeWaitReason = "NO_SKU" | "UNREGISTERED_SKU" | "MACHINE_OFF" | "RUN_FINISHED";
 
+/**
+ * Machine speed against the running SKU's output per minute: "ok" at or above it, "low" below it,
+ * "idle" while the machine is not in RUN (not compared), "unknown" without a reading or a registered SKU.
+ */
+export interface MachineSpeed {
+  value: number | null;
+  spec: number | null;
+  state: "ok" | "low" | "idle" | "unknown";
+}
+
 export interface MachineOee {
   machineId: string;
   machineName: string;
@@ -67,6 +77,8 @@ export interface MachineOee {
   stopSeconds: number;
   stopCount: number;
   sku: Sku;
+  /** Null when the machine has no speed tag. */
+  speed: MachineSpeed | null;
   updatedAt: string;
 }
 

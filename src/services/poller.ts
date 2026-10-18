@@ -1,7 +1,7 @@
 import { env } from "../config/env.js";
 import { dbHealth } from "../db/pool.js";
 import { HttpError } from "../lib/http-error.js";
-import type { MachineMonitoring, MachineOee, Sku } from "../types/oee.js";
+import type { MachineMonitoring, MachineOee, MachineSpeed, Sku } from "../types/oee.js";
 import type { SkuMaster } from "../types/sku.js";
 import { adaptiveTags } from "./adaptive-tags.js";
 import { gateway } from "./gateway.js";
@@ -14,6 +14,8 @@ import { forgetMachine, needsBaseline, statusOnly, updateOee } from "./oee-engin
 import { resolveStatus, settingsStore } from "./settings-store.js";
 import { shiftPeriodAt } from "./shift-store.js";
 import { skuStore } from "./sku-store.js";
+import { scaleTags } from "./yamato/fields.js";
+import { scaleManager } from "./yamato/scale-manager.js";
 
 export interface PollResult {
   oee: MachineOee[];
@@ -55,6 +57,17 @@ function resolveSku(raw: string | null, skus: Map<string, SkuMaster>): { sku: Sk
   };
 }
 
+/**
+ * Speed against the running SKU's output per minute; only a registered SKU has a spec. Outside RUN the
+ * speed is not compared (a stopped machine is not "below spec").
+ */
+function speedOf(raw: string | null | undefined, product: ReturnType<typeof resolveSku>, status: MachineOee["status"]): MachineSpeed {
+  const value = toNumber(raw);
+  const spec = product.registered && product.rate > 0 ? product.rate : null;
+  const state = status !== "RUN" ? "idle" : value === null || spec === null ? "unknown" : value >= spec ? "ok" : "low";
+  return { value, spec, state };
+}
+
 async function pollOnce(): Promise<PollResult> {
   const [all, statusDefinition, oee, skuList] = await Promise.all([
     machineStore.list(),
@@ -64,6 +77,8 @@ async function pollOnce(): Promise<PollResult> {
   ]);
   const machines = all.filter((m) => m.isActive);
   all.filter((m) => !m.isActive).forEach((m) => forgetMachine(m.id));
+  // Yamato connections follow the machine list (cheap when nothing changed).
+  scaleManager.sync(all);
   const oeeMachines = machines.filter((m) => m.oeeEnabled);
   const skus = indexSkus(skuList);
 
@@ -72,6 +87,8 @@ async function pollOnce(): Promise<PollResult> {
   for (const m of machines) {
     tags.add(m.tagStatus);
     m.monitoringTags.forEach((t) => tags.add(t.tagName));
+    // Speed is compared with the SKU on the product tag, also on status-only machines.
+    if (m.tagSpeed) [m.tagSpeed, m.tagProduct].forEach((t) => tags.add(t));
   }
   for (const m of oeeMachines) [m.tagOutput, m.tagReject, m.tagProduct].forEach((t) => tags.add(t));
 
@@ -101,42 +118,58 @@ async function pollOnce(): Promise<PollResult> {
   adaptiveTags.prune(new Map(all.map((m) => [m.id, m.adaptiveTtlMinutes])), now);
   const topicFilter = gatewaySettingsStore.cached()?.mqtt.topic ?? "urc/oee/#";
 
+  const oeeOf = (m: (typeof machines)[number]) => {
+    if (!m.oeeEnabled) {
+      // Drop any shift state so re-enabling OEE starts clean instead of crediting the gap.
+      forgetMachine(m.id);
+      return statusOnly(m, resolveStatus(toNumber(values[m.tagStatus]), statusDefinition), now);
+    }
+    const { sku, rate, registered } = resolveSku(values[m.tagProduct], skus);
+    return updateOee(
+      m,
+      { status: toNumber(values[m.tagStatus]), output: toNumber(values[m.tagOutput]), reject: toNumber(values[m.tagReject]) },
+      {
+        statusDefinition,
+        oee,
+        sku,
+        skuRegistered: registered,
+        idealRate: rate,
+        inputRejects: inputRejects.get(m.id),
+        // A counter with no reading before the shift started is counted from 0.
+        baseline: baselines && freshIds.has(m.id)
+          ? { output: toNumber(baselines[m.tagOutput]) ?? 0, reject: toNumber(baselines[m.tagReject]) ?? 0 }
+          : undefined,
+      },
+      now
+    );
+  };
+
   return {
     oee: machines.map((m) => {
-      if (!m.oeeEnabled) {
-        // Drop any shift state so re-enabling OEE starts clean instead of crediting the gap.
-        forgetMachine(m.id);
-        return statusOnly(m, resolveStatus(toNumber(values[m.tagStatus]), statusDefinition), now);
-      }
-      const { sku, rate, registered } = resolveSku(values[m.tagProduct], skus);
-      return updateOee(
-        m,
-        { status: toNumber(values[m.tagStatus]), output: toNumber(values[m.tagOutput]), reject: toNumber(values[m.tagReject]) },
-        {
-          statusDefinition,
-          oee,
-          sku,
-          skuRegistered: registered,
-          idealRate: rate,
-          inputRejects: inputRejects.get(m.id),
-          // A counter with no reading before the shift started is counted from 0.
-          baseline: baselines && freshIds.has(m.id)
-            ? { output: toNumber(baselines[m.tagOutput]) ?? 0, reject: toNumber(baselines[m.tagReject]) ?? 0 }
-            : undefined,
-        },
-        now
-      );
+      const result = oeeOf(m);
+      return m.tagSpeed ? { ...result, speed: speedOf(values[m.tagSpeed], resolveSku(values[m.tagProduct], skus), result.status) } : result;
     }),
-    monitoring: machines.map((m) =>
-      m.realtimeMode === "adaptive"
-        ? { machineId: m.id, mode: "adaptive", topic: machineTopic(topicFilter, m.machineNo), values: adaptiveTags.values(m.id), updatedAt }
+    monitoring: machines.map((m) => {
+      // Scale values come from its connection, so they go blank while the scale is unreachable.
+      const scale = scaleTags(m).map(({ field, ...t }) => {
+        const v = scaleManager.value(m.id, field.key);
+        return { ...t, value: field.text ? v : toNumber(v) };
+      });
+      return m.realtimeMode === "adaptive"
+        ? {
+            machineId: m.id,
+            mode: "adaptive",
+            topic: machineTopic(topicFilter, m.machineNo),
+            values: [...adaptiveTags.values(m.id), ...scale],
+            updatedAt,
+          }
         : {
             machineId: m.id,
             mode: "registered",
-            values: m.monitoringTags.map((t) => ({ ...t, value: toNumber(values[t.tagName]) })),
+            values: [...m.monitoringTags.map((t) => ({ ...t, value: toNumber(values[t.tagName]) })), ...scale],
             updatedAt,
-          }
-    ),
+          };
+    }),
   };
 }
 

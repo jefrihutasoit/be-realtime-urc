@@ -7,6 +7,7 @@ import { adaptiveTags } from "./adaptive-tags.js";
 import { gatewaySettingsStore } from "./gateway-settings.js";
 import { machineStore } from "./machine-store.js";
 import { tagValueStore } from "./tag-value-store.js";
+import { scaleTags } from "./yamato/fields.js";
 
 /**
  * Entry point for gateway readings (HTTP batch, MQTT, Simulator) and the source of current tag values.
@@ -96,13 +97,19 @@ export async function registeredTags() {
   const owners = new Map<string, string[]>();
   const own = (tag: string, no: string) => owners.set(tag, [...(owners.get(tag) ?? []), no]);
   for (const m of machines) {
-    [m.tagStatus, m.tagOutput, m.tagReject, m.tagProduct, ...m.monitoringTags.map((t) => t.tagName)].forEach((t) =>
-      own(t, m.machineNo)
+    const scale = scaleTags(m);
+    const speed = m.tagSpeed ? [m.tagSpeed] : [];
+    [m.tagStatus, m.tagOutput, m.tagReject, m.tagProduct, ...speed, ...m.monitoringTags.map((t) => t.tagName), ...scale.map((t) => t.tagName)].forEach(
+      (t) => own(t, m.machineNo)
     );
     for (const t of [m.tagStatus, m.tagOutput, m.tagReject]) all.add(t), numeric.add(t), production.add(t);
     all.add(m.tagProduct);
     production.add(m.tagProduct);
     m.monitoringTags.forEach((t) => (all.add(t.tagName), numeric.add(t.tagName)));
+    // Speed is stored like a monitoring tag (by the monitoring interval).
+    speed.forEach((t) => (all.add(t), numeric.add(t)));
+    // Yamato scale fields; text ones (product name) are not numeric.
+    scale.forEach((t) => (all.add(t.tagName), t.field.text || numeric.add(t.tagName)));
   }
   const monitoring = new Set([...all].filter((t) => !production.has(t)));
   const byNo = new Map(
