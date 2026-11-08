@@ -7,6 +7,7 @@ import { gatewaySettingsStore } from "./gateway-settings.js";
 import { resetEngine } from "./oee-engine.js";
 import { oeeStateStore } from "./oee-state-store.js";
 import { startPoller, type PollResult } from "./poller.js";
+import { scaleManager } from "./yamato/scale-manager.js";
 import { settingsStore } from "./settings-store.js";
 import { loadShifts } from "./shift-store.js";
 import { systemLog } from "./system-log.js";
@@ -147,6 +148,7 @@ export const systemState = {
     clearTimeout(retryTimer);
     clearInterval(healthTimer);
     stopPoller?.();
+    scaleManager.stop();
     systemLog.stop(reason);
   },
 

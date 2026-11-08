@@ -326,4 +326,18 @@ export const migrations: { id: string; sql: string[] }[] = [
         ADD COLUMN adaptive_ttl_min INT NOT NULL DEFAULT 480 AFTER realtime_mode`,
     ],
   },
+  {
+    id: "019_machine_scale",
+    sql: [
+      // Yamato scale of the machine as JSON text ({ enabled, host, port, mcSide, fields }); NULL when none.
+      `ALTER TABLE machines ADD COLUMN scale_config TEXT NULL AFTER adaptive_ttl_min`,
+    ],
+  },
+  {
+    id: "020_machine_speed_tag",
+    sql: [
+      // Optional speed tag, compared with the running SKU's output per minute on the dashboards. '' = none.
+      `ALTER TABLE machines ADD COLUMN tag_speed VARCHAR(200) NOT NULL DEFAULT '' AFTER tag_product`,
+    ],
+  },
 ];

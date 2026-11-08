@@ -63,7 +63,7 @@ interface Parsed {
 }
 
 interface Current {
-  machines: { id: string; machine_no: string; photo: string | null; created_at: Date }[];
+  machines: { id: string; machine_no: string; photo: string | null; scale_config: string | null; tag_speed: string; created_at: Date }[];
   skus: { id: string; sku_id: string; photo_file: string | null; created_at: Date }[];
   shifts: { id: string; name: string; created_at: Date }[];
   rejectTypes: { id: string; name: string; used: number }[];
@@ -277,7 +277,7 @@ async function parseBackup(body: unknown, errors: string[]): Promise<Parsed> {
 }
 
 async function loadCurrent(conn: PoolConnection | typeof pool): Promise<Current> {
-  const [machines] = await conn.query<RowDataPacket[]>("SELECT id, machine_no, photo, created_at FROM machines");
+  const [machines] = await conn.query<RowDataPacket[]>("SELECT id, machine_no, photo, scale_config, tag_speed, created_at FROM machines");
   const [skus] = await conn.query<RowDataPacket[]>("SELECT id, sku_id, photo_file, created_at FROM skus");
   const [shifts] = await conn.query<RowDataPacket[]>("SELECT id, name, created_at FROM shifts");
   const [rejectTypes] = await conn.query<RowDataPacket[]>(
@@ -465,11 +465,14 @@ export const backupStore = {
         machineIds.set(lower(m.machineNo), id);
         const photo = m.photo ?? old?.photo ?? null;
         await conn.query(
-          `INSERT INTO machines (id, machine_no, machine_name, tag_status, tag_output, tag_reject, tag_product,
-            output_unit, reject_unit, realtime_mode, adaptive_ttl_min, photo, is_active, oee_enabled, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          [id, m.machineNo, m.machineName, m.tagStatus, m.tagOutput, m.tagReject, m.tagProduct, m.outputUnit,
-            m.rejectUnit, m.realtimeMode, m.adaptiveTtlMinutes, photo, m.isActive, m.oeeEnabled, old?.created_at ?? now, now]
+          `INSERT INTO machines (id, machine_no, machine_name, tag_status, tag_output, tag_reject, tag_product, tag_speed,
+            output_unit, reject_unit, realtime_mode, adaptive_ttl_min, scale_config, photo, is_active, oee_enabled,
+            created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          // The speed tag and Yamato scale are not part of backups: a matched machine keeps its own.
+          [id, m.machineNo, m.machineName, m.tagStatus, m.tagOutput, m.tagReject, m.tagProduct, old?.tag_speed ?? "", m.outputUnit,
+            m.rejectUnit, m.realtimeMode, m.adaptiveTtlMinutes, old?.scale_config ?? null, photo, m.isActive, m.oeeEnabled,
+            old?.created_at ?? now, now]
         );
         if (m.monitoringTags.length) {
           await conn.query("INSERT INTO machine_monitoring_tags (id, machine_id, name, tag_name, unit, sort_order) VALUES ?", [
