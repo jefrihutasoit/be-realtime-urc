@@ -44,7 +44,7 @@ export interface MachineOee {
   quality: number;
   oee: number;
   status: LiveStatus;
-  /** False for machines that only report status; all OEE figures below are then 0 and must not be shown. */
+  /** False when the machine is left out of summaries; its OEE figures are still captured and shown per machine. */
   oeeEnabled: boolean;
   /** Whether OEE is accumulating right now; when false `waitingFor` says why. */
   counting: boolean;

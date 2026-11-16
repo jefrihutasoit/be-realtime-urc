@@ -2,6 +2,7 @@ import type { RequestHandler } from "express";
 import { dbHealth } from "../db/pool.js";
 import { authStore } from "../services/auth-store.js";
 import { hasGatewayKey } from "../services/gateway-manager.js";
+import { license } from "../services/license.js";
 import type { Me, Permission } from "../types/auth.js";
 
 // The dashboard data can be read without signing in (guest view). Everything else needs a session token
@@ -59,7 +60,39 @@ const bearer = (header: string | undefined) => /^Bearer\s+(\S+)$/i.exec(header ?
 /** The signed-in user, set by `authenticate`. */
 export const currentUser = (locals: Record<string, unknown>) => locals.user as Me;
 
+/** What works without a license: signing in, the own session, and the license itself. */
+const UNLICENSED_PATHS = [/^\/health$/, /^\/auth\/(login|me|logout)$/, /^\/system\/status$/, /^\/license$/];
+
+/** The user of a session token, also while the database is down (setup sessions, recently seen tokens). */
+async function userOf(token: string | null): Promise<Me | null> {
+  if (!token) return null;
+  const setup = authStore.setupUser(token);
+  if (setup) return setup;
+  if (!dbHealth.ready) return knownTokens.get(token) ?? null;
+  return authStore.userOfToken(token).catch(() => null);
+}
+
 export const authenticate: RequestHandler = async (req, res, next) => {
+  if (!license.isLicensed()) {
+    // Not licensed: everything is blocked except signing in and installing the license.
+    if (!UNLICENSED_PATHS.some((p) => p.test(req.path))) {
+      res.status(403).json({ error: "This system is not licensed", code: "LICENSE_REQUIRED" });
+      return;
+    }
+    if (req.path === "/health" || req.path === "/auth/login" || req.path === "/system/status") return next();
+    if (req.path === "/license" && req.method === "GET") return next();
+    const token = bearer(req.get("authorization"));
+    const user = await userOf(token);
+    if (!user) {
+      res.status(401).json({ error: "Please sign in" });
+      return;
+    }
+    res.locals.user = user;
+    res.locals.token = token;
+    return next();
+  }
+
+  if (req.path === "/license" && req.method === "GET") return next();
   if (PUBLIC.some((p) => p.test(req.path))) return next();
 
   // A gateway may push tag readings with its API key (Gateway settings) instead of a user session.

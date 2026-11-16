@@ -10,8 +10,8 @@ import { machineStore } from "./machine-store.js";
 import { oeeHistoryStore } from "./oee-history-store.js";
 import { oeeStateStore } from "./oee-state-store.js";
 import { rejectStore } from "./reject-store.js";
-import { forgetMachine, needsBaseline, statusOnly, updateOee } from "./oee-engine.js";
-import { resolveStatus, settingsStore } from "./settings-store.js";
+import { forgetMachine, needsBaseline, updateOee } from "./oee-engine.js";
+import { settingsStore } from "./settings-store.js";
 import { shiftPeriodAt } from "./shift-store.js";
 import { skuStore } from "./sku-store.js";
 import { scaleTags } from "./yamato/fields.js";
@@ -79,18 +79,16 @@ async function pollOnce(): Promise<PollResult> {
   all.filter((m) => !m.isActive).forEach((m) => forgetMachine(m.id));
   // Yamato connections follow the machine list (cheap when nothing changed).
   scaleManager.sync(all);
-  const oeeMachines = machines.filter((m) => m.oeeEnabled);
+  // OEE is captured for every active machine; "OEE enabled" only decides whether it counts in summaries.
+  const oeeMachines = machines;
   const skus = indexSkus(skuList);
 
-  // Every active machine reports status; only OEE-enabled ones need the counters and product.
   const tags = new Set<string>();
   for (const m of machines) {
-    tags.add(m.tagStatus);
+    [m.tagStatus, m.tagOutput, m.tagReject, m.tagProduct].forEach((t) => tags.add(t));
     m.monitoringTags.forEach((t) => tags.add(t.tagName));
-    // Speed is compared with the SKU on the product tag, also on status-only machines.
-    if (m.tagSpeed) [m.tagSpeed, m.tagProduct].forEach((t) => tags.add(t));
+    if (m.tagSpeed) tags.add(m.tagSpeed);
   }
-  for (const m of oeeMachines) [m.tagOutput, m.tagReject, m.tagProduct].forEach((t) => tags.add(t));
 
   const now = Date.now();
   const period = shiftPeriodAt(new Date(now));
@@ -119,11 +117,6 @@ async function pollOnce(): Promise<PollResult> {
   const topicFilter = gatewaySettingsStore.cached()?.mqtt.topic ?? "urc/oee/#";
 
   const oeeOf = (m: (typeof machines)[number]) => {
-    if (!m.oeeEnabled) {
-      // Drop any shift state so re-enabling OEE starts clean instead of crediting the gap.
-      forgetMachine(m.id);
-      return statusOnly(m, resolveStatus(toNumber(values[m.tagStatus]), statusDefinition), now);
-    }
     const { sku, rate, registered } = resolveSku(values[m.tagProduct], skus);
     return updateOee(
       m,

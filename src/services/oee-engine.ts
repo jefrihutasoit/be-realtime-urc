@@ -370,7 +370,8 @@ export function updateOee(machine: MachineRegistration, sample: Sample, ctx: Sam
     quality: pct(quality),
     oee: pct(Math.min(availability, 1) * Math.min(performance, 1) * Math.min(quality, 1)),
     status: breakdown ? "BREAKDOWN" : status,
-    oeeEnabled: true,
+    // Figures are always captured; this only says whether the machine counts in summaries.
+    oeeEnabled: machine.oeeEnabled,
     counting,
     waitingFor,
     runState: finished ? "FINISHED" : counting ? "RUNNING" : "WAITING",

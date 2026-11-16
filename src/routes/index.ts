@@ -10,6 +10,7 @@ import { downtimeRouter } from "./downtime.js";
 import { summaryRouter } from "./summary.js";
 import { reportsRouter } from "./reports.js";
 import { historicalRouter } from "./historical.js";
+import { licenseRouter } from "./license.js";
 import { getLatest } from "../services/poller.js";
 import { machinesRouter } from "./machines.js";
 import { layoutRouter } from "./layout.js";
@@ -45,6 +46,7 @@ apiRouter.use("/historical", historicalRouter);
 
 apiRouter.use("/gateway", gatewayRouter);
 apiRouter.use("/system", systemRouter);
+apiRouter.use("/license", licenseRouter);
 
 /** Latest OEE snapshot, for the dashboard's first render before the socket delivers. */
 apiRouter.get("/oee", (_req, res) => {

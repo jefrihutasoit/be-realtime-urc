@@ -8,7 +8,9 @@ export type SystemEventType =
   | "DB_UNAVAILABLE"
   | "DB_SETTINGS_CHANGED"
   | "SETTINGS_RESTORED"
-  | "DATABASE_RESTORED";
+  | "DATABASE_RESTORED"
+  | "LICENSE_INSTALLED"
+  | "LICENSE_INVALID";
 
 export interface SystemEvent {
   at: string;

@@ -4,6 +4,7 @@ import { dbConfig } from "./config/db-config.js";
 import { env } from "./config/env.js";
 import { dbHealth, pool } from "./db/pool.js";
 import { gatewayManager } from "./services/gateway-manager.js";
+import { license } from "./services/license.js";
 import { saveOeeStates } from "./services/poller.js";
 import { systemState } from "./services/system-state.js";
 import { stopIngest } from "./services/tag-ingest.js";
@@ -21,6 +22,7 @@ console.log(
   `OEE backend on http://localhost:${env.port} (db: ${database} on ${host}:${port}, gateway: ${env.gatewayMode}, poll: ${env.pollIntervalMs}ms)`
 );
 await systemState.boot(broadcast);
+license.startWatch();
 if (!dbHealth.ready) {
   console.warn("[db] running in setup mode: log in as Engineering and fix the database in System Management");
 }

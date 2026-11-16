@@ -95,7 +95,9 @@ export const summaryStore = {
       pool.query<RowDataPacket[]>(
         `SELECT t.name, SUM(i.quantity) AS qty FROM reject_records r
           JOIN reject_record_items i ON i.record_id = r.id JOIN reject_types t ON t.id = i.reject_type_id
-          WHERE r.production_date BETWEEN ? AND ? GROUP BY t.id, t.name ORDER BY qty DESC`,
+          LEFT JOIN machines m ON m.id = r.machine_id
+          WHERE r.production_date BETWEEN ? AND ? AND COALESCE(m.oee_enabled, 1) = 1
+          GROUP BY t.id, t.name ORDER BY qty DESC`,
         [from, to]
       ),
       pool.query<RowDataPacket[]>(
@@ -105,9 +107,11 @@ export const summaryStore = {
       ),
     ]);
     const machines = allMachines.filter((m) => m.isActive);
+    // OEE is captured for every machine, but machines with OEE disabled are left out of the summary.
+    const excluded = new Set(allMachines.filter((m) => !m.oeeEnabled).map((m) => m.id));
     const useTag = settings.rejectSource !== "input";
     const useInput = settings.rejectSource !== "tag";
-    const inputRows = useInput ? rejectRows[0] : [];
+    const inputRows = useInput ? rejectRows[0].filter((r) => !excluded.has(r.machine_id)) : [];
 
     // ---- per trend point (all machines)
     const buckets = Array.from(
@@ -127,6 +131,7 @@ export const summaryStore = {
       if (useTag) t.reject += r.rejectTag;
     };
     for (const r of hourly) {
+      if (excluded.has(r.machineId)) continue;
       const i = Math.floor((r.hourStart - dayStart.getTime()) / bucketMs);
       if (i < 0 || i >= buckets.length) continue;
       add(perBucket[i], r);

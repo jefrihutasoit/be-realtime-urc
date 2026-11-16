@@ -11,7 +11,8 @@ import { scaleManager } from "./yamato/scale-manager.js";
 import { settingsStore } from "./settings-store.js";
 import { loadShifts } from "./shift-store.js";
 import { systemLog } from "./system-log.js";
-import { startIngest, tagIngest } from "./tag-ingest.js";
+import { license } from "./license.js";
+import { startIngest, stopIngest, tagIngest } from "./tag-ingest.js";
 
 /**
  * Startup and database lifecycle. The HTTP server runs even when the database cannot be reached, so the
@@ -58,13 +59,31 @@ async function prepare(restoreStates: boolean) {
   }
 }
 
+/** Gateway (MQTT broker / client, HTTP ingest), tag storage and polling; only with a license. */
 function startServices() {
-  if (servicesStarted) return;
+  if (servicesStarted || !license.isLicensed()) return;
   servicesStarted = true;
   startIngest();
   gatewayManager.start();
   stopPoller = startPoller(onPoll);
 }
+
+/** Stops every connection-facing service (the license went away). */
+async function stopServices() {
+  if (!servicesStarted) return;
+  servicesStarted = false;
+  stopPoller?.();
+  stopPoller = null;
+  scaleManager.stop();
+  await gatewayManager.stop().catch((err) => console.error("[gateway]", err));
+  if (dbHealth.ready) await stopIngest().catch((err) => console.error("[ingest]", err));
+}
+
+license.onChange((licensed) => {
+  if (licensed) {
+    if (dbHealth.ready) startServices();
+  } else void stopServices();
+});
 
 function scheduleRetry() {
   clearTimeout(retryTimer);
@@ -139,7 +158,7 @@ export const systemState = {
     authStore.clearCache();
     gatewaySettingsStore.forget();
     const ok = await this.connect(true);
-    if (ok) await gatewayManager.apply(await gatewaySettingsStore.get()).catch((err) => console.error("[gateway]", err));
+    if (ok && servicesStarted) await gatewayManager.apply(await gatewaySettingsStore.get()).catch((err) => console.error("[gateway]", err));
     return ok;
   },
 

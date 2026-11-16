@@ -3,6 +3,7 @@ import express, { type ErrorRequestHandler } from "express";
 import { env } from "./config/env.js";
 import { HttpError } from "./lib/http-error.js";
 import { apiRouter } from "./routes/index.js";
+import { license } from "./services/license.js";
 
 const errorHandler: ErrorRequestHandler = (err, _req, res, _next) => {
   if (err instanceof HttpError) {
@@ -28,6 +29,10 @@ export function createApp() {
   app.use(express.json({ limit: "2mb" }));
 
   // Uploaded files get unique names, so they can be cached for a long time.
+  app.use("/uploads", (_req, res, next) => {
+    if (license.isLicensed()) return next();
+    res.status(403).json({ error: "This system is not licensed", code: "LICENSE_REQUIRED" });
+  });
   app.use("/uploads", express.static(env.uploadDir, { maxAge: "30d", immutable: true, index: false }));
   app.use("/api", apiRouter);
   app.use((_req, res) => {

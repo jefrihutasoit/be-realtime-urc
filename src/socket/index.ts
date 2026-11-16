@@ -1,6 +1,7 @@
 import type { Server as HttpServer } from "node:http";
 import { Server } from "socket.io";
 import { env } from "../config/env.js";
+import { license } from "../services/license.js";
 import { getLatest, type PollResult } from "../services/poller.js";
 import type { MachineMonitoring, MachineOee } from "../types/oee.js";
 
@@ -26,6 +27,14 @@ const room = (machineId: string) => `machine:${machineId}`;
 export function createSocketServer(httpServer: HttpServer) {
   const io = new Server<ClientToServer, ServerToClient>(httpServer, {
     cors: { origin: env.corsOrigin },
+    // Refuse the connection itself without a license.
+    allowRequest: (_req, callback) => callback(license.isLicensed() ? null : "LICENSE_REQUIRED", license.isLicensed()),
+  });
+
+  // No live data without a license; connected clients are dropped when the license goes away.
+  io.use((_socket, next) => (license.isLicensed() ? next() : next(new Error("LICENSE_REQUIRED"))));
+  license.onChange((licensed) => {
+    if (!licensed) io.disconnectSockets(true);
   });
 
   io.on("connection", (socket) => {
@@ -46,6 +55,7 @@ export function createSocketServer(httpServer: HttpServer) {
   return {
     io,
     broadcast({ oee, monitoring }: PollResult) {
+      if (!license.isLicensed()) return;
       io.emit("oee:update", oee);
       for (const m of monitoring) io.to(room(m.machineId)).emit("monitoring:update", m);
     },
