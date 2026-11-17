@@ -141,6 +141,7 @@ async function parseBackup(body: unknown, errors: string[]): Promise<Parsed> {
         adaptiveTtlMinutes: m.adaptiveTtlMinutes!,
         isActive: m.isActive!,
         oeeEnabled: m.oeeEnabled!,
+        category: m.category!,
         photo,
         monitoringTags: (m.monitoringTags ?? []).map((t) => ({ name: t.name, tagName: t.tagName, unit: t.unit })),
       });
@@ -421,6 +422,7 @@ export const backupStore = {
         adaptiveTtlMinutes: m.adaptiveTtlMinutes,
         isActive: m.isActive,
         oeeEnabled: m.oeeEnabled,
+        category: m.category,
         photo: isPhotoPath(m.photo) ? m.photo : null,
         monitoringTags: m.monitoringTags.map((t) => ({ name: t.name, tagName: t.tagName, unit: t.unit })),
       })),
@@ -467,12 +469,12 @@ export const backupStore = {
         await conn.query(
           `INSERT INTO machines (id, machine_no, machine_name, tag_status, tag_output, tag_reject, tag_product, tag_speed,
             output_unit, reject_unit, realtime_mode, adaptive_ttl_min, scale_config, photo, is_active, oee_enabled,
-            created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            category, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           // The speed tag and Yamato scale are not part of backups: a matched machine keeps its own.
           [id, m.machineNo, m.machineName, m.tagStatus, m.tagOutput, m.tagReject, m.tagProduct, old?.tag_speed ?? "", m.outputUnit,
             m.rejectUnit, m.realtimeMode, m.adaptiveTtlMinutes, old?.scale_config ?? null, photo, m.isActive, m.oeeEnabled,
-            old?.created_at ?? now, now]
+            m.category ?? "BAGGER", old?.created_at ?? now, now]
         );
         if (m.monitoringTags.length) {
           await conn.query("INSERT INTO machine_monitoring_tags (id, machine_id, name, tag_name, unit, sort_order) VALUES ?", [

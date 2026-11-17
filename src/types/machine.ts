@@ -51,10 +51,16 @@ export interface MachineRegistration {
   /** Image URL or data URL; null when no photo has been uploaded. */
   photo: string | null;
   isActive: boolean;
+  /** False: OEE is still captured and shown, but the machine is left out of every summary. */
   oeeEnabled: boolean;
+  /** Evaluation group: Bagger and Machine Packaging have separate OEE / output summaries. */
+  category: MachineCategory;
   createdAt: string;
   updatedAt: string;
 }
+
+export const MACHINE_CATEGORIES = ["BAGGER", "PACKAGING"] as const;
+export type MachineCategory = (typeof MACHINE_CATEGORIES)[number];
 
 export type ProductionTagKey = "tagStatus" | "tagOutput" | "tagReject" | "tagProduct";
 
@@ -76,6 +82,7 @@ export type MachineInput = Pick<
   | "photo"
   | "isActive"
   | "oeeEnabled"
+  | "category"
 > & { monitoringTags: MonitoringTagInput[]; scale?: ScaleConfig | null };
 
 export interface GatewayTag {

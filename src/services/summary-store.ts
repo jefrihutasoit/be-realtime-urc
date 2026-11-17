@@ -2,6 +2,7 @@ import type { RowDataPacket } from "mysql2/promise";
 import { pool } from "../db/pool.js";
 import { HttpError } from "../lib/http-error.js";
 import type { DailySummary, OeeFigures } from "../types/summary.js";
+import { MACHINE_CATEGORIES, type MachineCategory } from "../types/machine.js";
 import { machineStore } from "./machine-store.js";
 import { oeeHistoryStore, type HourlyRow } from "./oee-history-store.js";
 import { settingsStore } from "./settings-store.js";
@@ -65,10 +66,15 @@ function datesBetween(from: string, to: string) {
 }
 
 export const summaryStore = {
-  /** Summary of the production dates `from` to `to`: per hour for one day, per day for longer ranges. */
-  async range(fromValue: string, toValue: string): Promise<DailySummary> {
+  /**
+   * Summary of the production dates `from` to `to` for one machine category (Bagger and Machine Packaging
+   * are evaluated separately): per hour for one day, per day for longer ranges.
+   */
+  async range(fromValue: string, toValue: string, categoryValue: unknown = "BAGGER"): Promise<DailySummary> {
     const from = parseDate(fromValue, "from");
     const to = parseDate(toValue, "to");
+    const category = (categoryValue || "BAGGER") as MachineCategory;
+    if (!MACHINE_CATEGORIES.includes(category)) throw new HttpError(400, "category must be BAGGER or PACKAGING");
     if (from > to) throw new HttpError(400, "from must not be after to");
     const dates = datesBetween(from, to);
     if (dates.length > MAX_DAYS) throw new HttpError(400, `A summary covers at most ${MAX_DAYS} days`);
@@ -97,21 +103,37 @@ export const summaryStore = {
           JOIN reject_record_items i ON i.record_id = r.id JOIN reject_types t ON t.id = i.reject_type_id
           LEFT JOIN machines m ON m.id = r.machine_id
           WHERE r.production_date BETWEEN ? AND ? AND COALESCE(m.oee_enabled, 1) = 1
+            AND COALESCE(m.category, 'BAGGER') = ?
           GROUP BY t.id, t.name ORDER BY qty DESC`,
-        [from, to]
+        [from, to, category]
       ),
       pool.query<RowDataPacket[]>(
-        `SELECT COALESCE(NULLIF(downtime_type, ''), 'Other') AS type, SUM(COALESCE(duration_seconds, 0)) AS seconds,
-            COUNT(*) AS count FROM downtime_records WHERE production_date BETWEEN ? AND ? GROUP BY type`,
-        [from, to]
+        // A row with a notification number is unplanned downtime; without one it is planned. A row belongs to
+        // the category of its (first) machine; rows without a known machine count as Bagger.
+        `SELECT COALESCE(NULLIF(d.downtime_type, ''), 'Other') AS type, (TRIM(d.notification_no) <> '') AS unplanned,
+            SUM(COALESCE(d.duration_seconds, 0)) AS seconds, COUNT(*) AS count
+          FROM downtime_records d
+          WHERE d.production_date BETWEEN ? AND ?
+            AND COALESCE((SELECT m.category FROM downtime_record_machines x JOIN machines m ON m.id = x.machine_id
+              WHERE x.record_id = d.id ORDER BY x.machine_no LIMIT 1), 'BAGGER') = ?
+          GROUP BY type, unplanned`,
+        [from, to, category]
       ),
     ]);
     const machines = allMachines.filter((m) => m.isActive);
-    // OEE is captured for every machine, but machines with OEE disabled are left out of the summary.
-    const excluded = new Set(allMachines.filter((m) => !m.oeeEnabled).map((m) => m.id));
+    // Only machines of this category count. OEE is captured for every machine, but machines with OEE
+    // disabled are left out of the summary.
+    const byId = new Map(allMachines.map((m) => [m.id, m]));
+    /** Whether a machine counts here; history of deleted machines counts as Bagger. */
+    const inCategory = (id: string) => {
+      const m = byId.get(id);
+      return m ? m.oeeEnabled && m.category === category : category === "BAGGER";
+    };
+    /** Machine status is shown for both categories together (still without OEE-disabled machines). */
+    const inStatus = (id: string) => byId.get(id)?.oeeEnabled ?? true;
     const useTag = settings.rejectSource !== "input";
     const useInput = settings.rejectSource !== "tag";
-    const inputRows = useInput ? rejectRows[0].filter((r) => !excluded.has(r.machine_id)) : [];
+    const inputRows = useInput ? rejectRows[0].filter((r) => inCategory(r.machine_id)) : [];
 
     // ---- per trend point (all machines)
     const buckets = Array.from(
@@ -131,14 +153,14 @@ export const summaryStore = {
       if (useTag) t.reject += r.rejectTag;
     };
     for (const r of hourly) {
-      if (excluded.has(r.machineId)) continue;
       const i = Math.floor((r.hourStart - dayStart.getTime()) / bucketMs);
       if (i < 0 || i >= buckets.length) continue;
+      if (inStatus(r.machineId)) for (const st of ["RUN", "STOP", "OFF"] as const) statusMs[st] += r.statusMs[st];
+      if (!inCategory(r.machineId)) continue;
       add(perBucket[i], r);
       if (!perMachine.has(r.machineId)) perMachine.set(r.machineId, empty());
       add(perMachine.get(r.machineId)!, r);
       stopMs += r.stopMs;
-      for (const st of ["RUN", "STOP", "OFF"] as const) statusMs[st] += r.statusMs[st];
     }
 
     // ---- reject input: per machine, and spread over the points of its shift by output
@@ -167,7 +189,7 @@ export const summaryStore = {
 
     // ---- per machine
     const machineRows = machines
-      .filter((m) => m.oeeEnabled)
+      .filter((m) => inCategory(m.id))
       .map((m) => {
         const t = perMachine.get(m.id) ?? empty();
         return {
@@ -187,9 +209,21 @@ export const summaryStore = {
     const rejectTag = useTag ? hourly.reduce((s, r) => s + r.rejectTag, 0) : 0;
 
     // ---- uploaded downtime
-    const byType = downtimeRows[0]
-      .map((r) => ({ type: String(r.type), seconds: Number(r.seconds), count: Number(r.count) }))
-      .sort((a, b) => b.seconds - a.seconds);
+    const typeMap = new Map<string, { type: string; seconds: number; count: number }>();
+    const planned = { seconds: 0, count: 0 };
+    const unplanned = { seconds: 0, count: 0 };
+    for (const r of downtimeRows[0]) {
+      const seconds = Number(r.seconds);
+      const count = Number(r.count);
+      const t = typeMap.get(String(r.type)) ?? { type: String(r.type), seconds: 0, count: 0 };
+      t.seconds += seconds;
+      t.count += count;
+      typeMap.set(t.type, t);
+      const category = Number(r.unplanned) ? unplanned : planned;
+      category.seconds += seconds;
+      category.count += count;
+    }
+    const byType = [...typeMap.values()].sort((a, b) => b.seconds - a.seconds);
 
     return {
       from,
@@ -198,7 +232,10 @@ export const summaryStore = {
       dayStart: dayStart.toISOString(),
       dayEnd: dayEnd.toISOString(),
       generatedAt: new Date().toISOString(),
-      activeMachines: machines.length,
+      category,
+      // Machines of this category with OEE enabled.
+      activeMachines: machines.filter((m) => inCategory(m.id)).length,
+      statusMachines: machines.filter((m) => inStatus(m.id)).length,
       oee: {
         oee: avg("oee"),
         availability: avg("availability"),
@@ -228,6 +265,8 @@ export const summaryStore = {
       downtime: {
         totalSeconds: byType.reduce((s, t) => s + t.seconds, 0),
         byType,
+        planned,
+        unplanned,
       },
     };
   },

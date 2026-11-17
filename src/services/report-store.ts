@@ -90,6 +90,14 @@ export async function reportContext(query: Record<string, unknown>) {
   ]);
 
   const machineNo = new Map(machines.map((m) => [m.id, m.machineNo]));
+  // Optional machine category (Bagger / Machine Packaging): totals of one category only. Machines no longer
+  // registered count as Bagger.
+  const categoryFilter = String(query.category ?? "").trim().toUpperCase();
+  if (categoryFilter && categoryFilter !== "BAGGER" && categoryFilter !== "PACKAGING") {
+    throw new HttpError(400, "category must be BAGGER or PACKAGING");
+  }
+  const machineCategory = new Map(machines.map((m) => [m.id, m.category]));
+  const inCategory = (id: string) => !categoryFilter || (machineCategory.get(id) ?? "BAGGER") === categoryFilter;
   const skuMaster = new Map(skus.map((s) => [s.skuId.toLowerCase(), s]));
   /** Product names of SKUs outside the master, from the reject input. */
   const productNames = new Map<string, string>();
@@ -139,6 +147,7 @@ export async function reportContext(query: Record<string, unknown>) {
       date <= to &&
       (!shiftFilter || shiftId === shiftFilter) &&
       (!machineFilter.size || machineFilter.has(machineId)) &&
+      inCategory(machineId) &&
       (!skuFilter.size || skuFilter.has(skuKey) || skuFilter.has(skuLabel(skuKey).skuCode.toLowerCase())),
   };
 }

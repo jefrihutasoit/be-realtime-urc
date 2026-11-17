@@ -13,6 +13,9 @@ type Method = "WRITE" | "DELETE" | "ANY";
 
 const RULES: [Method, RegExp, Permission][] = [
   ["ANY", /^\/backup(\/|$)/, "backup.manage"],
+  // Downloading a full / database backup comes with the backup permission; restoring, clearing and
+  // initializing the database stay with database.manage (Engineering).
+  ["ANY", /^\/database\/backup$/, "backup.manage"],
   ["ANY", /^\/database(\/|$)/, "database.manage"],
   ["ANY", /^\/system\/(database|info|log)(\/|$)/, "database.manage"],
   ["WRITE", /^\/settings\/appearance$/, "appearance.manage"],

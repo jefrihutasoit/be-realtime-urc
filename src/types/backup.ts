@@ -51,6 +51,8 @@ export interface BackupMachine {
   adaptiveTtlMinutes: number;
   isActive: boolean;
   oeeEnabled: boolean;
+  /** Missing in older backups: BAGGER. */
+  category?: "BAGGER" | "PACKAGING";
   /** Only photo paths (e.g. "/machines/packing-machine.svg"); uploaded photos are not in the backup. */
   photo: string | null;
   monitoringTags: { name: string; tagName: string; unit: string }[];

@@ -23,7 +23,12 @@ export interface DailySummary {
   /** End of the last production day. */
   dayEnd: string;
   generatedAt: string;
+  /** The machine category summarised (Bagger and Machine Packaging are evaluated separately). */
+  category: "BAGGER" | "PACKAGING";
+  /** Active machines of the category with OEE enabled (the ones the summary counts). */
   activeMachines: number;
+  /** Active machines of both categories with OEE enabled: the machine status is shown for them together. */
+  statusMachines: number;
   /** Average of the machines' OEE over the range, over machines that counted time. */
   oee: OeeFigures & { machines: number };
   output: number;
@@ -44,10 +49,14 @@ export interface DailySummary {
   machines: { machineId: string; machineNo: string; oee: number | null; output: number; reject: number }[];
   /** Stop / Breakdown time counted by the OEE engine, all machines. */
   machineDowntimeSeconds: number;
-  /** Time per status of the status tag, all OEE machines. */
+  /** Time per status of the status tag, both categories together (OEE-enabled machines). */
   statusSeconds: { RUN: number; STOP: number; OFF: number };
   downtime: {
     totalSeconds: number;
     byType: { type: string; seconds: number; count: number }[];
+    /** Rows without a notification number. */
+    planned: { seconds: number; count: number };
+    /** Rows with a notification number. */
+    unplanned: { seconds: number; count: number };
   };
 }

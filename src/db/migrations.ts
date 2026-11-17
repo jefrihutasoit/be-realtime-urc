@@ -340,4 +340,14 @@ export const migrations: { id: string; sql: string[] }[] = [
       `ALTER TABLE machines ADD COLUMN tag_speed VARCHAR(200) NOT NULL DEFAULT '' AFTER tag_product`,
     ],
   },
+  {
+    id: "021_machine_category",
+    sql: [
+      // Evaluation group: BAGGER or PACKAGING, each with its own OEE / output summary.
+      `ALTER TABLE machines ADD COLUMN category VARCHAR(20) NOT NULL DEFAULT 'BAGGER' AFTER oee_enabled`,
+      // Until now "OEE disabled" marked the machines that are not baggers: they become Machine Packaging and
+      // are counted again, in the packaging summary.
+      `UPDATE machines SET category = 'PACKAGING', oee_enabled = 1 WHERE oee_enabled = 0`,
+    ],
+  },
 ];

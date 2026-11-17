@@ -26,21 +26,19 @@ export const PERMISSIONS = [
   { key: "layout.manage", group: "Settings", label: "Layout mapping" },
   { key: "oee.settings", group: "Settings", label: "OEE calculation" },
   { key: "appearance.manage", group: "Settings", label: "Theme (appearance)" },
+  { key: "backup.manage", group: "System", label: "Backup: full database download, settings backup & restore" },
+  { key: "gateway.manage", group: "System", label: "Gateway & MQTT settings" },
   { key: "users.manage", group: "Users", label: "User management & roles" },
 ] as const;
 
 /**
- * Only the Engineering account has these: machine settings, status definition, settings backup & restore,
- * simulator, database backup / restore / initialize / clear, and gateway settings.
+ * Only the Engineering account has these: machine settings, status definition, simulator, and database
+ * backup / restore / initialize / clear and connection.
  */
-export const ENGINEERING_PERMISSIONS = [
-  "machines.manage",
-  "status.manage",
-  "backup.manage",
-  "simulator.use",
-  "database.manage",
-  "gateway.manage",
-] as const;
+export const ENGINEERING_PERMISSIONS = ["machines.manage", "status.manage", "simulator.use", "database.manage"] as const;
+
+/** Given to a role only when chosen in User Management (not part of the default Admin role). */
+const OPT_IN_PERMISSIONS: Permission[] = ["backup.manage", "gateway.manage"];
 
 export type Permission = (typeof PERMISSIONS)[number]["key"] | (typeof ENGINEERING_PERMISSIONS)[number];
 export type RolePermissions = Record<ManagedRole, Permission[]>;
@@ -49,7 +47,7 @@ export type RolePermissions = Record<ManagedRole, Permission[]>;
 export const FIXED_PERMISSIONS: Partial<Record<ManagedRole, Permission[]>> = { ADMIN: ["users.manage"] };
 
 export const DEFAULT_ROLE_PERMISSIONS: RolePermissions = {
-  ADMIN: PERMISSIONS.map((p) => p.key),
+  ADMIN: PERMISSIONS.map((p) => p.key).filter((p) => !OPT_IN_PERMISSIONS.includes(p)),
   ENGINEER: ["reject.submit", "reject.edit", "downtime.submit", "downtime.edit", "shift.manage"],
   OPERATOR: ["reject.submit", "downtime.submit"],
 };

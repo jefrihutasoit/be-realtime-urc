@@ -10,7 +10,9 @@ import type {
   ProductionUnitKey,
   RealtimeMode,
   ScaleConfig,
+  MachineCategory,
 } from "../types/machine.js";
+import { MACHINE_CATEGORIES } from "../types/machine.js";
 import { YAMATO_FIELD_BY_KEY } from "./yamato/fields.js";
 
 // Machine registry backed by MySQL (tables `machines` and `machine_monitoring_tags`; the Yamato scale
@@ -38,6 +40,11 @@ function parseRealtimeMode(value: unknown): RealtimeMode {
   return value as RealtimeMode;
 }
 
+function parseCategory(value: unknown): MachineCategory {
+  if (!MACHINE_CATEGORIES.includes(value as MachineCategory)) throw new HttpError(400, "Category must be BAGGER or PACKAGING");
+  return value as MachineCategory;
+}
+
 function parseTtl(value: unknown): number {
   if (typeof value !== "number" || !Number.isInteger(value) || value < 1 || value > MAX_TTL_MIN) {
     throw new HttpError(400, `Adaptive tag expiry must be 1 to ${MAX_TTL_MIN} minutes`);
@@ -51,6 +58,7 @@ const BULK_FIELDS: [keyof MachineRegistration, string, (v: unknown) => string | 
   ["rejectUnit", "reject_unit", (v) => parseUnit(v, "Reject unit")],
   ["realtimeMode", "realtime_mode", parseRealtimeMode],
   ["adaptiveTtlMinutes", "adaptive_ttl_min", parseTtl],
+  ["category", "category", parseCategory],
 ];
 
 // Kept under MySQL's default 1 MB max_allowed_packet (XAMPP). The frontend sends ~50 KB JPEGs.
@@ -78,6 +86,7 @@ interface MachineRow extends RowDataPacket {
   photo: string | null;
   is_active: number;
   oee_enabled: number;
+  category: string;
   created_at: Date;
   updated_at: Date;
 }
@@ -203,6 +212,9 @@ export async function parseMachineInput(body: unknown, partial = false): Promise
   else if (!partial) data.realtimeMode = "registered";
   if ("adaptiveTtlMinutes" in b) data.adaptiveTtlMinutes = parseTtl(b.adaptiveTtlMinutes);
   else if (!partial) data.adaptiveTtlMinutes = DEFAULT_TTL_MIN;
+  // Optional on create (and in older backups): a bagger.
+  if ("category" in b) data.category = parseCategory(b.category);
+  else if (!partial) data.category = "BAGGER";
 
   if (has("monitoringTags")) data.monitoringTags = parseMonitoringTags(b.monitoringTags ?? []);
   // Optional everywhere: older clients and backups do not send it.
@@ -281,6 +293,7 @@ function toMachine(row: MachineRow, tags: MonitoringTag[]): MachineRegistration 
     photo: row.photo,
     isActive: !!row.is_active,
     oeeEnabled: !!row.oee_enabled,
+    category: row.category === "PACKAGING" ? "PACKAGING" : "BAGGER",
     createdAt: row.created_at.toISOString(),
     updatedAt: row.updated_at.toISOString(),
   };
@@ -348,11 +361,11 @@ export const machineStore = {
       await conn.query<ResultSetHeader>(
         `INSERT INTO machines (id, machine_no, machine_name, tag_status, tag_output, tag_reject, tag_product, tag_speed,
           output_unit, reject_unit, realtime_mode, adaptive_ttl_min, scale_config, photo, is_active, oee_enabled,
-          created_at, updated_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          category, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [id, m.machineNo, m.machineName, m.tagStatus, m.tagOutput, m.tagReject, m.tagProduct, m.tagSpeed,
           m.outputUnit, m.rejectUnit, m.realtimeMode, m.adaptiveTtlMinutes, m.scale ? JSON.stringify(m.scale) : null,
-          m.photo, m.isActive, m.oeeEnabled, now, now]
+          m.photo, m.isActive, m.oeeEnabled, m.category, now, now]
       );
       await saveMonitoringTags(conn, id, m.monitoringTags, new Set());
       return (await loadMachines(conn, id))[0];
@@ -371,10 +384,10 @@ export const machineStore = {
       await conn.query(
         `UPDATE machines SET machine_no = ?, machine_name = ?, tag_status = ?, tag_output = ?, tag_reject = ?,
           tag_product = ?, tag_speed = ?, output_unit = ?, reject_unit = ?, realtime_mode = ?, adaptive_ttl_min = ?, scale_config = ?,
-          photo = ?, is_active = ?, oee_enabled = ?, updated_at = ? WHERE id = ?`,
+          photo = ?, is_active = ?, oee_enabled = ?, category = ?, updated_at = ? WHERE id = ?`,
         [m.machineNo, m.machineName, m.tagStatus, m.tagOutput, m.tagReject, m.tagProduct, m.tagSpeed,
           m.outputUnit, m.rejectUnit, m.realtimeMode, m.adaptiveTtlMinutes, m.scale ? JSON.stringify(m.scale) : null,
-          m.photo, m.isActive, m.oeeEnabled, new Date(), id]
+          m.photo, m.isActive, m.oeeEnabled, m.category, new Date(), id]
       );
       if (data.monitoringTags) {
         const ownIds = new Set(current.monitoringTags.map((t) => t.id));
