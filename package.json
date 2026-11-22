@@ -5,12 +5,13 @@
   "type": "module",
   "scripts": {
     "dev": "tsx watch src/server.ts",
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc --noEmit -p tsconfig.json && node scripts/build.mjs",
     "start": "node dist/server.js",
     "typecheck": "tsc --noEmit",
     "db:migrate": "tsx src/db/scripts/migrate.ts",
     "db:seed": "tsx src/db/scripts/seed.ts",
-    "db:demo": "tsx src/db/scripts/demo.ts"
+    "db:demo": "tsx src/db/scripts/demo.ts",
+    "build:fast": "OBFUSCATE=0 node scripts/build.mjs"
   },
   "engines": {
     "node": ">=22"
@@ -27,6 +28,8 @@
     "@types/cors": "^2.8.19",
     "@types/express": "^5.0.6",
     "@types/node": "^26.6.4",
+    "esbuild": "^0.25.0",
+    "javascript-obfuscator": "^4.1.1",
     "tsx": "^4.23.15",
     "typescript": "^7.0.2"
   }
