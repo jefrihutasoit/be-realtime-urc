@@ -33,14 +33,22 @@ export interface OeeSettings {
   /**
    * "sku": OEE only counts while the product tag holds a SKU ID registered in the SKU master.
    * "always": OEE always counts; an unknown or empty SKU uses the default ideal rate.
+   * "notOff": OEE counts while the machine status is Run or Stop (Off time is not counted); no SKU is needed,
+   * an unknown or empty SKU uses the default ideal rate.
    */
-  startMode: "sku" | "always";
+  startMode: "sku" | "always" | "notOff";
   /**
    * "cumulative": output/reject tags are ever-increasing counters; the increase is counted.
    * "direct": the tag value itself is the total for the current run (the PLC resets it).
    */
   counterMode: "cumulative" | "direct";
-  /** Start a new OEE run when the running SKU changes (only checked while the machine is not Off). */
+  /**
+   * "sku": an OEE run ends at the shift boundary and (with `resetOnSkuChange`) when the SKU changes.
+   * "shift": one OEE run per full shift; a SKU change does not reset it, the target follows the active SKU
+   * minute by minute, time without a valid SKU counts as downtime, and every SKU's own figures are recorded.
+   */
+  countingMode: "sku" | "shift";
+  /** Start a new OEE run when the running SKU changes (only checked while the machine is not Off; "sku" counting). */
   resetOnSkuChange: boolean;
   /** Off time is paused (not counted). When false, Off counts as downtime in Availability. */
   pauseWhenOff: boolean;
@@ -67,6 +75,7 @@ export interface OeeSettings {
 export const DEFAULT_OEE_SETTINGS: OeeSettings = {
   startMode: "sku",
   counterMode: "cumulative",
+  countingMode: "sku",
   resetOnSkuChange: true,
   pauseWhenOff: true,
   rejectSource: "both",

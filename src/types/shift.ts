@@ -7,11 +7,29 @@ export interface Shift {
   start: string;
   end: string;
   durationMinutes: number;
+  /**
+   * Weekdays the shift runs on, by the day its start falls on (0 = Sunday ... 6 = Saturday); all seven by
+   * default. A shift starting Friday 22:00 and ending Saturday 06:00 belongs to Friday.
+   */
+  days: number[];
+  /** Other times on some of those days (same shift, e.g. a shorter Saturday); other days use start / end. */
+  dayTimes: ShiftDayTime[];
   createdAt: string;
   updatedAt: string;
 }
 
-export type ShiftInput = Pick<Shift, "name" | "start" | "end">;
+/** The times of a shift on one weekday, when they differ from its default start / end. */
+export interface ShiftDayTime {
+  day: number;
+  start: string;
+  end: string;
+  durationMinutes: number;
+}
+
+export type ShiftInput = Pick<Shift, "name" | "start" | "end"> & {
+  days?: number[];
+  dayTimes?: Pick<ShiftDayTime, "day" | "start" | "end">[];
+};
 
 /**
  * A concrete shift occurrence on the timeline. Time not covered by any shift is a gap period

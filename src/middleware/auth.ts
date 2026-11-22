@@ -35,7 +35,7 @@ const RULES: [Method, RegExp, Permission][] = [
   ["WRITE", /^\/downtime(\/|$)/, "downtime.submit"],
 ];
 
-const PUBLIC = [/^\/health$/, /^\/auth\/login$/, /^\/system\/status$/];
+const PUBLIC = [/^\/health$/, /^\/auth\/login$/, /^\/system\/(status|resources)$/];
 
 /** What works while the database is down (setup mode): own session, and fixing the connection. */
 const SETUP_PATHS = [/^\/auth\/(me|logout)$/, /^\/system\/(database|info|log)(\/|$)/];

@@ -59,4 +59,28 @@ export interface DailySummary {
     /** Rows with a notification number. */
     unplanned: { seconds: number; count: number };
   };
+  /** Every SKU each machine of the category ran per shift, with that SKU's own figures. */
+  skuRuns: SkuRun[];
+}
+
+/**
+ * One SKU of one machine in one shift: its own figures (output, reject, OEE of that SKU's part of the shift
+ * only) and the first / last moment it was seen. skuCode "-" is time without a SKU (downtime in full-shift
+ * counting).
+ */
+export interface SkuRun extends OeeFigures {
+  date: string;
+  shiftId: string | null;
+  shiftName: string;
+  machineId: string;
+  machineNo: string;
+  skuCode: string;
+  productName: string;
+  /** null for data saved before start / end times were kept. */
+  start: string | null;
+  end: string | null;
+  countedSeconds: number;
+  runSeconds: number;
+  output: number;
+  reject: number;
 }

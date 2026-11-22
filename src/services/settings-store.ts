@@ -109,8 +109,9 @@ export function parseOeeSettings(body: unknown): OeeSettings {
     return { sku: r.sku, status: r.status, holdSeconds: hold } as FinishRule;
   });
   return {
-    startMode: choice(b.startMode, ["sku", "always"] as const, "Start mode", d.startMode),
+    startMode: choice(b.startMode, ["sku", "always", "notOff"] as const, "Start mode", d.startMode),
     counterMode: choice(b.counterMode, ["cumulative", "direct"] as const, "Counter mode", d.counterMode),
+    countingMode: choice(b.countingMode, ["sku", "shift"] as const, "Counting mode", d.countingMode),
     resetOnSkuChange: bool(b.resetOnSkuChange, "resetOnSkuChange", d.resetOnSkuChange),
     pauseWhenOff: bool(b.pauseWhenOff, "pauseWhenOff", d.pauseWhenOff),
     rejectSource: choice(b.rejectSource, ["both", "tag", "input"] as const, "Reject source", d.rejectSource),

@@ -3,6 +3,7 @@ import { dbConfig, dbConfigView, parseDbConfig } from "../config/db-config.js";
 import { dbHealth, testDbConfig } from "../db/pool.js";
 import { currentUser } from "../middleware/auth.js";
 import { systemLog } from "../services/system-log.js";
+import { systemResources } from "../services/system-resources.js";
 import { systemState } from "../services/system-state.js";
 import type { SystemEventType, SystemInfo, SystemStatus } from "../types/system.js";
 
@@ -16,6 +17,11 @@ const status = (): SystemStatus => ({
 });
 
 /** Open to everyone: lets the app show that the database is down. */
+/** Open to everyone: CPU, memory and storage of the server for the sidebar. */
+systemRouter.get("/resources", (_req, res) => {
+  res.json(systemResources());
+});
+
 systemRouter.get("/status", (_req, res) => {
   res.json(status());
 });

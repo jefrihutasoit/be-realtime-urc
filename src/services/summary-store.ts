@@ -4,9 +4,10 @@ import { HttpError } from "../lib/http-error.js";
 import type { DailySummary, OeeFigures } from "../types/summary.js";
 import { MACHINE_CATEGORIES, type MachineCategory } from "../types/machine.js";
 import { machineStore } from "./machine-store.js";
+import { loadCells, skuRunsOf } from "./report-store.js";
 import { oeeHistoryStore, type HourlyRow } from "./oee-history-store.js";
 import { settingsStore } from "./settings-store.js";
-import { shiftDefs } from "./shift-store.js";
+import { shiftDefs, timesOn } from "./shift-store.js";
 
 // Summary for the dashboard, built in one request from the hourly OEE figures, reject input and
 // uploaded downtime of a range of production dates.
@@ -179,8 +180,10 @@ export const summaryStore = {
     for (const { date, shiftId, qty } of inputByShift.values()) {
       const def = shiftDefs().find((s) => s.id === shiftId);
       const [y, m, d] = date.split("-").map(Number);
-      const start = def ? new Date(y, m - 1, d, 0, def.start).getTime() : dayStartOf(date).getTime();
-      const end = def ? start + def.duration * 60_000 : start + DAY;
+      // The shift's times on that date's weekday (a shift may run other hours on, e.g., Saturday).
+      const t = def ? timesOn(def, new Date(y, m - 1, d).getDay()) : null;
+      const start = t ? new Date(y, m - 1, d, 0, t.start).getTime() : dayStartOf(date).getTime();
+      const end = t ? start + t.duration * 60_000 : start + DAY;
       const idx = buckets.map((b, i) => (b + bucketMs > start && b < end ? i : -1)).filter((i) => i >= 0);
       if (!idx.length) continue;
       const output = idx.reduce((sum, i) => sum + perBucket[i].output, 0);
@@ -225,9 +228,14 @@ export const summaryStore = {
     }
     const byType = [...typeMap.values()].sort((a, b) => b.seconds - a.seconds);
 
+    // ---- SKU records per shift (machines of this category that count)
+    const skuCells = await loadCells({ from, to, category });
+    const skuRuns = skuRunsOf(skuCells.ctx, skuCells.cells.filter((c) => inCategory(c.machineId)));
+
     return {
       from,
       to,
+      skuRuns,
       days: dates.length,
       dayStart: dayStart.toISOString(),
       dayEnd: dayEnd.toISOString(),

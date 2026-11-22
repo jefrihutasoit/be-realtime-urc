@@ -6,6 +6,8 @@ import { resolveStatus, settingsStore } from "../services/settings-store.js";
 import { tagValueStore } from "../services/tag-value-store.js";
 import { shiftPeriodAt } from "../services/shift-store.js";
 import { statusSegments, trendStore } from "../services/trend-store.js";
+import { currentShiftSkuRuns } from "../services/report-store.js";
+import { scaleMonitor } from "../services/scale-monitor.js";
 import { scaleManager } from "../services/yamato/scale-manager.js";
 import type {
   MachineHistory,
@@ -112,6 +114,26 @@ machinesRouter.get("/:id/timeline", async (req, res) => {
 });
 
 /** `?from=&to=` (ISO times): output / reject counters, monitoring tags and status over that range. */
+/** SKUs the machine ran in the shift running now, each with its own figures (`{ shiftName, start, end, skus }`). */
+machinesRouter.get("/:id/shift-skus", async (req, res) => {
+  const machine = await getMachine(req.params.id);
+  res.json(await currentShiftSkuRuns(machine.id));
+});
+
+/**
+ * `?from=&to=[&signal=key][&low=key][&high=key]`: one weight signal with its low / high limit tags and the SKUs run
+ * with their target weight (`ScaleMonitor`). `low` / `high` = "none" turns a limit off.
+ */
+machinesRouter.get("/:id/scale-monitor", async (req, res) => {
+  res.json(
+    await scaleMonitor(await getMachine(req.params.id), req.query.from, req.query.to, {
+      signal: req.query.signal,
+      low: req.query.low,
+      high: req.query.high,
+    })
+  );
+});
+
 machinesRouter.get("/:id/trend", async (req, res) => {
   res.json(await trendStore.trend(await getMachine(req.params.id), req.query.from, req.query.to));
 });

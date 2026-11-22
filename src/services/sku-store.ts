@@ -22,6 +22,7 @@ interface SkuRow extends RowDataPacket {
   product_name: string;
   sku: string;
   output_per_minute: string;
+  target_weight: string | null;
   photo_file: string | null;
   created_at: Date;
   updated_at: Date;
@@ -37,6 +38,7 @@ const toSku = (row: SkuRow): SkuMaster => ({
   productName: row.product_name,
   sku: row.sku,
   outputPerMinute: Number(row.output_per_minute),
+  targetWeight: row.target_weight === null ? null : Number(row.target_weight),
   photo: row.photo_file ? `${SKU_PHOTO_URL}/${row.photo_file}` : null,
   createdAt: row.created_at.toISOString(),
   updatedAt: row.updated_at.toISOString(),
@@ -84,6 +86,15 @@ export function parseSkuInput(body: unknown, current?: SkuMaster): ParsedSku {
     }
     data.outputPerMinute = Math.round(v * 100) / 100;
   }
+
+  // Target weight: optional (null or empty clears it).
+  if ("targetWeight" in b) {
+    const v = b.targetWeight;
+    if (v === null || v === "") data.targetWeight = null;
+    else if (typeof v !== "number" || !Number.isFinite(v) || v < 0 || v > 10_000_000) {
+      throw new HttpError(400, "Target weight must be a number of 0 or more");
+    } else data.targetWeight = Math.round(v * 100) / 100;
+  } else if (!partial) data.targetWeight = null;
   return data;
 }
 
@@ -137,9 +148,9 @@ export const skuStore = {
     const file = data.photo ? await savePhoto(data.photo) : null;
     try {
       await pool.query(
-        `INSERT INTO skus (id, sku_id, product_name, sku, output_per_minute, photo_file, created_at, updated_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-        [id, data.skuId, data.productName, data.sku, data.outputPerMinute, file, now, now]
+        `INSERT INTO skus (id, sku_id, product_name, sku, output_per_minute, target_weight, photo_file, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [id, data.skuId, data.productName, data.sku, data.outputPerMinute, data.targetWeight ?? null, file, now, now]
       );
     } catch (err) {
       await deletePhoto(file);
@@ -158,13 +169,14 @@ export const skuStore = {
     const photoFile = data.photo === undefined ? row.photo_file : newFile;
     try {
       await pool.query(
-        `UPDATE skus SET sku_id = ?, product_name = ?, sku = ?, output_per_minute = ?, photo_file = ?, updated_at = ?
-          WHERE id = ?`,
+        `UPDATE skus SET sku_id = ?, product_name = ?, sku = ?, output_per_minute = ?, target_weight = ?, photo_file = ?,
+          updated_at = ? WHERE id = ?`,
         [
           data.skuId ?? row.sku_id,
           data.productName ?? row.product_name,
           data.sku ?? row.sku,
           data.outputPerMinute ?? row.output_per_minute,
+          "targetWeight" in data ? data.targetWeight : row.target_weight,
           photoFile,
           new Date(),
           id,

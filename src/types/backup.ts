@@ -63,6 +63,8 @@ export interface BackupSku {
   productName: string;
   sku: string;
   outputPerMinute: number;
+  /** Target weight; missing in older backups. */
+  targetWeight?: number | null;
 }
 
 export interface BackupShift {
@@ -70,6 +72,10 @@ export interface BackupShift {
   /** "HH:mm". */
   start: string;
   end: string;
+  /** Weekdays (0 = Sunday ... 6 = Saturday); missing in older backups: every day. */
+  days?: number[];
+  /** Other times on some days; missing in older backups. */
+  dayTimes?: { day: number; start: string; end: string }[];
 }
 
 export interface BackupLayoutMarker {

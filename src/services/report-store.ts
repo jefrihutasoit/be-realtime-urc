@@ -2,6 +2,7 @@ import type { RowDataPacket } from "mysql2/promise";
 import { pool } from "../db/pool.js";
 import { HttpError } from "../lib/http-error.js";
 import type { Report, ReportFigures, ReportGroup, ReportRow, ReportType } from "../types/report.js";
+import type { SkuRun } from "../types/summary.js";
 import { machineStore } from "./machine-store.js";
 import { oeeHistoryStore } from "./oee-history-store.js";
 import { settingsStore } from "./settings-store.js";
@@ -53,6 +54,9 @@ export interface Cell {
   machineId: string;
   skuKey: string;
   totals: Totals;
+  /** First and last moment (epoch ms) the SKU was seen; null when unknown (older rows, reject input only). */
+  firstAt: number | null;
+  lastAt: number | null;
 }
 
 export function parseDate(value: unknown, name: string) {
@@ -193,7 +197,7 @@ export async function loadCells(query: Record<string, unknown>) {
     const key = `${date}|${shiftId ?? ""}|${machineId}|${skuKey}`;
     let c = cells.get(key);
     if (!c) {
-      c = { date, shiftId, shiftName, machineId, skuKey, totals: emptyTotals() };
+      c = { date, shiftId, shiftName, machineId, skuKey, totals: emptyTotals(), firstAt: null, lastAt: null };
       cells.set(key, c);
     }
     return c;
@@ -205,7 +209,10 @@ export async function loadCells(query: Record<string, unknown>) {
     const period = shiftPeriodAt(new Date(r.hourStart));
     const skuKey = ctx.skuKeyOf(r.skuCode);
     if (!ctx.keep(date, period.shiftId, r.machineId, skuKey)) continue;
-    addTotals(cellFor(date, period.shiftId, period.name, r.machineId, skuKey).totals, {
+    const cell = cellFor(date, period.shiftId, period.name, r.machineId, skuKey);
+    if (r.firstAt !== null) cell.firstAt = cell.firstAt === null ? r.firstAt : Math.min(cell.firstAt, r.firstAt);
+    if (r.lastAt !== null) cell.lastAt = cell.lastAt === null ? r.lastAt : Math.max(cell.lastAt, r.lastAt);
+    addTotals(cell.totals, {
       countedMs: r.countedMs,
       runMs: r.runMs,
       idealOutput: r.idealOutput,
@@ -288,3 +295,43 @@ export const reportStore = {
     return { type, from: ctx.from, to: ctx.to, generatedAt: new Date().toISOString(), groups, total: figuresOf(grand) };
   },
 };
+
+/**
+ * SKU records per shift: every SKU a machine ran in a shift, with its own figures (output, reject, OEE of that
+ * SKU's part of the shift only) and the first / last moment it was seen. Newest date first, then shifts in
+ * production-day order, machines by number and SKUs by start time.
+ */
+export function skuRunsOf(ctx: ReportContext, cells: Cell[]): SkuRun[] {
+  return cells
+    .filter((c) => c.totals.countedMs > 0 || c.totals.output > 0)
+    .map((c) => ({
+      date: c.date,
+      shiftId: c.shiftId,
+      shiftName: c.shiftName,
+      machineId: c.machineId,
+      machineNo: ctx.noOf(c.machineId),
+      ...ctx.skuLabel(c.skuKey),
+      start: c.firstAt === null ? null : new Date(c.firstAt).toISOString(),
+      end: c.lastAt === null ? null : new Date(c.lastAt).toISOString(),
+      countedSeconds: Math.round(c.totals.countedMs / 1000),
+      runSeconds: Math.round(c.totals.runMs / 1000),
+      ...figuresOf(c.totals),
+    }))
+    .sort(
+      (a, b) =>
+        b.date.localeCompare(a.date) ||
+        ctx.shiftRank(a.shiftId) - ctx.shiftRank(b.shiftId) ||
+        a.machineNo.localeCompare(b.machineNo, undefined, { numeric: true }) ||
+        (a.start ?? "").localeCompare(b.start ?? "")
+    );
+}
+
+/** SKU records of one machine in the shift running now (machine detail page). */
+export async function currentShiftSkuRuns(machineId: string) {
+  const period = shiftPeriodAt(new Date());
+  const firstShiftMinute = shiftDefs().length ? Math.min(...shiftDefs().map((s) => s.start)) : 0;
+  // Production date of the running shift: the day whose production day (from the earliest shift) holds it.
+  const date = ymdOf(new Date(Date.parse(period.start) - firstShiftMinute * 60_000));
+  const { ctx, cells } = await loadCells({ from: date, to: date, machines: machineId, shift: period.shiftId ?? "" });
+  return { shiftName: period.name, start: period.start, end: period.end, skus: skuRunsOf(ctx, cells) };
+}

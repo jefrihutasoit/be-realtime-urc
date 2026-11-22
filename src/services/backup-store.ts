@@ -21,7 +21,7 @@ import { machineStore, parseMachineInput, PRODUCTION_TAGS } from "./machine-stor
 import { forgetMachine } from "./oee-engine.js";
 import { rejectStore } from "./reject-store.js";
 import { APPEARANCE_KEY, parseAppearance, parseOeeSettings, parseStatusDefinition, settingsStore } from "./settings-store.js";
-import { durationOf, loadShifts, overlaps, parseTime, shiftStore } from "./shift-store.js";
+import { dayTimesJson, durationOf, loadShifts, overlaps, parseDays, parseDayTimes, parseTime, shiftStore } from "./shift-store.js";
 import { gatewayManager } from "./gateway-manager.js";
 import { GATEWAY_SETTINGS_KEY, gatewaySettingsStore, parseGatewaySettings } from "./gateway-settings.js";
 import { systemLog } from "./system-log.js";
@@ -49,7 +49,12 @@ const isPhotoPath = (photo: string | null): photo is string => typeof photo === 
 interface Parsed {
   machines: BackupMachine[];
   skus: BackupSku[];
-  shifts: (BackupShift & { startMinute: number; endMinute: number })[];
+  shifts: (BackupShift & {
+    startMinute: number;
+    endMinute: number;
+    days: number[];
+    dayTimeDefs: Record<number, { start: number; duration: number }>;
+  })[];
   statusDefinition: StatusDefinition | null;
   oeeSettings: OeeSettings;
   rolePermissions: RolePermissions | null;
@@ -161,10 +166,17 @@ async function parseBackup(body: unknown, errors: string[]): Promise<Parsed> {
         productName: raw.productName,
         sku: raw.sku,
         outputPerMinute: raw.outputPerMinute,
+        targetWeight: raw.targetWeight ?? null,
       });
       if (skuIds.has(lower(s.skuId!))) throw new Error("SKU ID is used twice");
       skuIds.add(lower(s.skuId!));
-      parsed.skus.push({ skuId: s.skuId!, productName: s.productName!, sku: s.sku!, outputPerMinute: s.outputPerMinute! });
+      parsed.skus.push({
+        skuId: s.skuId!,
+        productName: s.productName!,
+        sku: s.sku!,
+        outputPerMinute: s.outputPerMinute!,
+        targetWeight: s.targetWeight ?? null,
+      });
     } catch (err) {
       errors.push(`${label}: ${message(err)}`);
     }
@@ -180,13 +192,22 @@ async function parseBackup(body: unknown, errors: string[]): Promise<Parsed> {
       const startMinute = parseTime(raw.start, "Start");
       const endMinute = parseTime(raw.end, "End");
       if (startMinute === endMinute) throw new Error("Start and end must be different");
-      const def = { id: name, name, start: startMinute, duration: durationOf(startMinute, endMinute) };
+      const days = parseDays(raw.days);
+      const dayTimeDefs = parseDayTimes(raw.dayTimes, days);
+      const def = { id: name, name, start: startMinute, duration: durationOf(startMinute, endMinute), days, dayTimes: dayTimeDefs };
       for (const other of parsed.shifts) {
         if (lower(other.name) === lower(name)) throw new Error("Shift name is used twice");
-        const otherDef = { id: other.name, name: other.name, start: other.startMinute, duration: durationOf(other.startMinute, other.endMinute) };
+        const otherDef = {
+          id: other.name,
+          name: other.name,
+          start: other.startMinute,
+          duration: durationOf(other.startMinute, other.endMinute),
+          days: other.days,
+          dayTimes: other.dayTimeDefs,
+        };
         if (overlaps(def, otherDef)) throw new Error(`Overlaps with ${other.name} (${other.start}–${other.end})`);
       }
-      parsed.shifts.push({ name, start: String(raw.start).trim(), end: String(raw.end).trim(), startMinute, endMinute });
+      parsed.shifts.push({ name, start: String(raw.start).trim(), end: String(raw.end).trim(), startMinute, endMinute, days, dayTimeDefs });
     } catch (err) {
       errors.push(`${label}: ${message(err)}`);
     }
@@ -426,8 +447,20 @@ export const backupStore = {
         photo: isPhotoPath(m.photo) ? m.photo : null,
         monitoringTags: m.monitoringTags.map((t) => ({ name: t.name, tagName: t.tagName, unit: t.unit })),
       })),
-      skus: skus.map((s) => ({ skuId: s.skuId, productName: s.productName, sku: s.sku, outputPerMinute: s.outputPerMinute })),
-      shifts: shifts.map((s) => ({ name: s.name, start: s.start, end: s.end })),
+      skus: skus.map((s) => ({
+        skuId: s.skuId,
+        productName: s.productName,
+        sku: s.sku,
+        outputPerMinute: s.outputPerMinute,
+        targetWeight: s.targetWeight,
+      })),
+      shifts: shifts.map((s) => ({
+        name: s.name,
+        start: s.start,
+        end: s.end,
+        days: s.days,
+        dayTimes: s.dayTimes.map((t) => ({ day: t.day, start: t.start, end: t.end })),
+      })),
       statusDefinition,
       oeeSettings,
       rolePermissions,
@@ -490,10 +523,10 @@ export const backupStore = {
       for (const s of parsed.skus) {
         const old = skuById.get(lower(s.skuId));
         await conn.query(
-          `INSERT INTO skus (id, sku_id, product_name, sku, output_per_minute, photo_file, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-          [old?.id ?? randomUUID(), s.skuId, s.productName, s.sku, s.outputPerMinute, old?.photo_file ?? null,
-            old?.created_at ?? now, now]
+          `INSERT INTO skus (id, sku_id, product_name, sku, output_per_minute, target_weight, photo_file, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [old?.id ?? randomUUID(), s.skuId, s.productName, s.sku, s.outputPerMinute, s.targetWeight ?? null,
+            old?.photo_file ?? null, old?.created_at ?? now, now]
         );
       }
       const backupSkus = new Set(parsed.skus.map((s) => lower(s.skuId)));
@@ -505,8 +538,8 @@ export const backupStore = {
       for (const s of parsed.shifts) {
         const old = shiftByName.get(lower(s.name));
         await conn.query(
-          "INSERT INTO shifts (id, name, start_minute, end_minute, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
-          [old?.id ?? randomUUID(), s.name, s.startMinute, s.endMinute, old?.created_at ?? now, now]
+          "INSERT INTO shifts (id, name, start_minute, end_minute, days, day_times, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+          [old?.id ?? randomUUID(), s.name, s.startMinute, s.endMinute, s.days.join(","), dayTimesJson(s.dayTimeDefs), old?.created_at ?? now, now]
         );
       }
 

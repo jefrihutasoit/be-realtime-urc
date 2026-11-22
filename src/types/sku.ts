@@ -8,6 +8,8 @@ export interface SkuMaster {
   sku: string;
   /** Ideal output rate in packs per minute. */
   outputPerMinute: number;
+  /** Target weight of one pack, in the unit of the scale signal (e.g. g); null when not set. */
+  targetWeight: number | null;
   /** Public path of the photo file, e.g. "/uploads/skus/<file>.jpg"; null when none. */
   photo: string | null;
   createdAt: string;
@@ -18,6 +20,9 @@ export interface SkuMaster {
  * `photo` on input: a data URL uploads a new photo, null removes it,
  * and omitting it (or sending the current path back) keeps the existing one.
  */
-export type SkuInput = Pick<SkuMaster, "skuId" | "productName" | "sku" | "outputPerMinute"> & {
+export type SkuInput = Pick<
+  SkuMaster,
+  "skuId" | "productName" | "sku" | "outputPerMinute" | "targetWeight"
+> & {
   photo?: string | null;
 };

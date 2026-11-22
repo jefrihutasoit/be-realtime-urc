@@ -17,6 +17,9 @@ export interface HourlyRow {
   output: number;
   rejectTag: number;
   statusMs: { RUN: number; STOP: number; OFF: number };
+  /** First and last moment (epoch ms) the SKU was seen in the hour; null for rows saved before this was kept. */
+  firstAt: number | null;
+  lastAt: number | null;
 }
 
 export const oeeHistoryStore = {
@@ -27,12 +30,14 @@ export const oeeHistoryStore = {
     try {
       await pool.query(
         `INSERT INTO oee_hourly (machine_id, hour_start, sku_code, counted_ms, run_ms, stop_ms, ideal_output, output, reject_tag,
-          st_run_ms, st_stop_ms, st_off_ms) VALUES ?
+          st_run_ms, st_stop_ms, st_off_ms, first_at, last_at) VALUES ?
           ON DUPLICATE KEY UPDATE counted_ms = counted_ms + VALUES(counted_ms), run_ms = run_ms + VALUES(run_ms),
             stop_ms = stop_ms + VALUES(stop_ms), ideal_output = ideal_output + VALUES(ideal_output),
             output = output + VALUES(output), reject_tag = reject_tag + VALUES(reject_tag),
             st_run_ms = st_run_ms + VALUES(st_run_ms), st_stop_ms = st_stop_ms + VALUES(st_stop_ms),
-            st_off_ms = st_off_ms + VALUES(st_off_ms)`,
+            st_off_ms = st_off_ms + VALUES(st_off_ms),
+            first_at = IF(first_at IS NULL OR VALUES(first_at) < first_at, COALESCE(VALUES(first_at), first_at), first_at),
+            last_at = IF(last_at IS NULL OR VALUES(last_at) > last_at, COALESCE(VALUES(last_at), last_at), last_at)`,
         [
           list.map((b) => [
             b.machineId,
@@ -47,6 +52,8 @@ export const oeeHistoryStore = {
             Math.round(b.statusMs.RUN),
             Math.round(b.statusMs.STOP),
             Math.round(b.statusMs.OFF),
+            b.firstAt === null ? null : new Date(b.firstAt),
+            b.lastAt === null ? null : new Date(b.lastAt),
           ]),
         ]
       );
@@ -73,6 +80,8 @@ export const oeeHistoryStore = {
       output: Number(r.output),
       rejectTag: Number(r.reject_tag),
       statusMs: { RUN: Number(r.st_run_ms), STOP: Number(r.st_stop_ms), OFF: Number(r.st_off_ms) },
+      firstAt: r.first_at ? (r.first_at as Date).getTime() : null,
+      lastAt: r.last_at ? (r.last_at as Date).getTime() : null,
     }));
   },
 };

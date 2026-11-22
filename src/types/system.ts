@@ -54,3 +54,13 @@ export interface AppearanceSettings {
 }
 
 export const DEFAULT_APPEARANCE: AppearanceSettings = { mode: "light", accent: "blue" };
+
+/** GET /system/resources: CPU, memory and storage of the server (sidebar gauges). */
+export interface SystemResources {
+  /** Busy share of all cores over the last few seconds; null right after startup. */
+  cpu: { percent: number | null; cores: number };
+  memory: { usedBytes: number; totalBytes: number; percent: number };
+  /** Disk holding the data (uploads); null when it cannot be read. */
+  disk: { usedBytes: number; totalBytes: number; percent: number } | null;
+  at: string;
+}

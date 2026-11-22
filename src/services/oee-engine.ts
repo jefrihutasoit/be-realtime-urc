@@ -7,7 +7,11 @@ import { resolveStatus } from "./settings-store.js";
 /**
  * Turns gateway samples into OEE for one "run": a stretch of the current shift that ends at the shift
  * boundary, when the machine's OEE settings change, (with resetOnSkuChange) when the SKU changes, or
- * when one of the machine's finish rules holds. A finished run keeps its figures until production can
+ * when one of the machine's finish rules holds.
+ * Counting mode "shift": one run per full shift. A SKU change does not reset it (the ideal output follows the
+ * active SKU minute by minute), time without a valid SKU is downtime with no ideal output, output is always
+ * counted from the counter increase (a PLC reset on SKU change is not lost), and Quality takes the reject input
+ * of every SKU of the shift. Each SKU's own figures are in the hourly buckets (per SKU, with first / last time). A finished run keeps its figures until production can
  * start again: the gate is open, the machine is not Off and no finish rule holds.
  * With breakdownWhenOff, Off during a run that has run and is not finished is a breakdown: downtime,
  * counted in the same Stop / Breakdown timer as STOP.
@@ -56,6 +60,8 @@ interface MachineState {
   rulesKey: string;
   /** Whether time and output were counting since the last sample. */
   lastCounting: boolean;
+  /** "shift" counting: the interval since the last sample had no valid SKU (downtime). */
+  lastNoSku?: boolean;
   /** Ideal rate (packs/min) in effect since the last sample. */
   lastRate: number;
   /** Product tag code in effect since the last sample; the hourly bucket of the interval is booked to it. */
@@ -108,6 +114,9 @@ export interface HourlyBucket {
   rejectTag: number;
   /** Time per status of the status tag, counting or not. */
   statusMs: Record<MachineStatus, number>;
+  /** First and last moment (epoch ms) this SKU was seen in the hour; null when no time was credited. */
+  firstAt: number | null;
+  lastAt: number | null;
 }
 
 const buckets = new Map<string, HourlyBucket>();
@@ -129,6 +138,8 @@ function bucketFor(machineId: string, at: number, skuCode: string) {
       output: 0,
       rejectTag: 0,
       statusMs: { RUN: 0, STOP: 0, OFF: 0 },
+      firstAt: null,
+      lastAt: null,
     };
     buckets.set(key, b);
   }
@@ -153,8 +164,13 @@ export function returnHourlyBuckets(list: HourlyBucket[]) {
     b.output += old.output;
     b.rejectTag += old.rejectTag;
     for (const st of ["RUN", "STOP", "OFF"] as const) b.statusMs[st] += old.statusMs[st];
+    b.firstAt = minOf(b.firstAt, old.firstAt);
+    b.lastAt = maxOf(b.lastAt, old.lastAt);
   }
 }
+
+const minOf = (a: number | null, b: number | null) => (a === null ? b : b === null ? a : Math.min(a, b));
+const maxOf = (a: number | null, b: number | null) => (a === null ? b : b === null ? a : Math.max(a, b));
 
 const pct = (n: number) => Math.round(Math.min(Math.max(n, 0), 1) * 1000) / 10;
 /** The settings a run is calculated with; finish rules, reject source and machine name do not restart it. */
@@ -196,10 +212,13 @@ function counterDelta(current: number | null, last: number | null) {
 
 /** Whether OEE counts right now, and if not, why. */
 function gateOf(config: OeeSettings, status: MachineStatus, ctx: SampleContext): OeeWaitReason | null {
-  if (config.startMode === "sku") {
+  // Full-shift counting does not wait for a SKU: time without one is downtime (see `noSku` in updateOee).
+  if (config.startMode === "sku" && config.countingMode !== "shift") {
     if (ctx.sku.code === "-") return "NO_SKU";
     if (!ctx.skuRegistered) return "UNREGISTERED_SKU";
   }
+  // "notOff": counts only while the machine is Run or Stop; no SKU needed.
+  if (config.startMode === "notOff" && status === "OFF") return "MACHINE_OFF";
   if (status === "OFF" && config.pauseWhenOff) return "MACHINE_OFF";
   return null;
 }
@@ -234,7 +253,12 @@ export function updateOee(machine: MachineRegistration, sample: Sample, ctx: Sam
   // Gate from SKU and Off settings alone; a finished run and breakdowns are applied below.
   const gateWait = gateOf(config, status, ctx);
   const periodStart = Date.parse(shiftPeriodAt(new Date(now)).start);
-  const direct = config.counterMode === "direct";
+  const shiftMode = config.countingMode === "shift";
+  // Full shift: output is the counter increase, so a PLC counter reset on a SKU change keeps the shift total.
+  const direct = config.counterMode === "direct" && !shiftMode;
+  // Full shift with a registered SKU required: no valid SKU (empty or not in the master) is downtime. The other
+  // start modes need no SKU: an unknown or empty one counts with the default ideal rate.
+  const noSku = shiftMode && config.startMode === "sku" && (isEmptySku(ctx.sku.code) || !ctx.skuRegistered);
 
   let s = states.get(machine.id);
   if (!s) {
@@ -269,18 +293,23 @@ export function updateOee(machine: MachineRegistration, sample: Sample, ctx: Sam
   // The same amounts go to the bucket of the hour and SKU for the daily summary and reports.
   const gap = now - s.lastSampleAt;
   const bucket = bucketFor(machine.id, now, s.lastSkuCode ?? ctx.sku.code);
-  if (gap > 0 && gap <= MAX_CREDIT_GAP_MS) bucket.statusMs[s.lastStatus] += gap;
+  if (gap > 0 && gap <= MAX_CREDIT_GAP_MS) {
+    bucket.statusMs[s.lastStatus] += gap;
+    bucket.firstAt = minOf(bucket.firstAt, s.lastSampleAt);
+    bucket.lastAt = maxOf(bucket.lastAt, now);
+  }
   if (s.lastCounting && gap <= MAX_CREDIT_GAP_MS) {
     const ms = gap;
-    const ideal = (ms / 60_000) * s.lastRate;
+    // Time without a valid SKU has no target: it lowers Availability only.
+    const ideal = s.lastNoSku ? 0 : (ms / 60_000) * s.lastRate;
     run.countedMs += ms;
     run.idealOutput += ideal;
     bucket.countedMs += ms;
     bucket.idealOutput += ideal;
-    if (s.lastStatus === "RUN") {
+    if (s.lastStatus === "RUN" && !s.lastNoSku) {
       run.runMs += ms;
       bucket.runMs += ms;
-    } else if (s.lastStatus === "STOP" || s.lastBreakdown) {
+    } else if (s.lastStatus === "STOP" || s.lastBreakdown || s.lastNoSku) {
       run.stopMs += ms;
       bucket.stopMs += ms;
     }
@@ -320,7 +349,7 @@ export function updateOee(machine: MachineRegistration, sample: Sample, ctx: Sam
   const canStart = gateWait === null && status !== "OFF";
   if (run.finishedAt !== null) {
     if (canStart && !holds.some(Boolean)) s.run = newRun(periodStart, configKey, now);
-  } else if (canStart && config.resetOnSkuChange && run.skuCode !== null && run.skuCode !== ctx.sku.code) {
+  } else if (canStart && !shiftMode && config.resetOnSkuChange && run.skuCode !== null && run.skuCode !== ctx.sku.code) {
     s.run = newRun(periodStart, configKey, now);
   }
   const current = s.run;
@@ -333,8 +362,8 @@ export function updateOee(machine: MachineRegistration, sample: Sample, ctx: Sam
 
   if (counting) {
     // A stop or breakdown starts when the machine goes down; STOP turning into a breakdown is the same one.
-    const wasDown = s.lastCounting && (s.lastStatus === "STOP" || s.lastBreakdown);
-    if ((status === "STOP" || breakdown) && (!wasDown || current.countedMs === 0)) current.stopCount += 1;
+    const wasDown = s.lastCounting && (s.lastStatus === "STOP" || s.lastBreakdown || !!s.lastNoSku);
+    if ((status === "STOP" || breakdown || noSku) && (!wasDown || current.countedMs === 0)) current.stopCount += 1;
     current.skuCode = ctx.sku.code;
     if (direct) {
       // The tag value is the total itself; the bucket gets the increase.
@@ -351,13 +380,21 @@ export function updateOee(machine: MachineRegistration, sample: Sample, ctx: Sam
   s.lastRate = ctx.idealRate;
   s.lastSkuCode = ctx.sku.code;
   s.lastCounting = counting;
+  s.lastNoSku = noSku && counting;
   s.lastSampleAt = now;
 
   const availability = current.countedMs > 0 ? current.runMs / current.countedMs : 0;
   const performance = current.idealOutput > 0 ? current.output / current.idealOutput : 0;
   const rejectTag = config.rejectSource === "input" ? 0 : current.reject;
+  // Reject input of the run's SKU; for a full shift, of every SKU of the shift.
   const rejectInput =
-    config.rejectSource === "tag" || current.skuCode === null ? 0 : (ctx.inputRejects?.[current.skuCode.toLowerCase()] ?? 0);
+    config.rejectSource === "tag"
+      ? 0
+      : shiftMode
+        ? Object.values(ctx.inputRejects ?? {}).reduce((sum, q) => sum + q, 0)
+        : current.skuCode === null
+          ? 0
+          : (ctx.inputRejects?.[current.skuCode.toLowerCase()] ?? 0);
   const reject = rejectTag + rejectInput;
   const quality = current.output > 0 ? (current.output - reject) / current.output : 1;
 

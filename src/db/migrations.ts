@@ -350,4 +350,44 @@ export const migrations: { id: string; sql: string[] }[] = [
       `UPDATE machines SET category = 'PACKAGING', oee_enabled = 1 WHERE oee_enabled = 0`,
     ],
   },
+  {
+    id: "022_oee_hourly_times",
+    sql: [
+      // First and last moment a SKU was seen in the hour: start and end of the SKU records per shift.
+      `ALTER TABLE oee_hourly
+        ADD COLUMN first_at DATETIME(3) NULL,
+        ADD COLUMN last_at DATETIME(3) NULL`,
+    ],
+  },
+  {
+    id: "023_shift_days",
+    sql: [
+      // Days a shift runs on, by the weekday its start falls on: "0,1,2,3,4,5,6" (0 = Sunday ... 6 = Saturday).
+      `ALTER TABLE shifts ADD COLUMN days VARCHAR(20) NOT NULL DEFAULT '0,1,2,3,4,5,6' AFTER end_minute`,
+    ],
+  },
+  {
+    id: "024_shift_day_times",
+    sql: [
+      // Other times of the same shift on some weekdays, e.g. Saturday: JSON {"6": [startMinute, endMinute]}.
+      `ALTER TABLE shifts ADD COLUMN day_times TEXT NULL AFTER days`,
+    ],
+  },
+  {
+    id: "025_sku_weight_spec",
+    sql: [
+      // Weight specification of a SKU, for the scale monitoring (in the unit of the weight signal, e.g. g).
+      `ALTER TABLE skus
+        ADD COLUMN target_weight DECIMAL(10,2) NULL AFTER output_per_minute,
+        ADD COLUMN low_limit DECIMAL(10,2) NULL AFTER target_weight,
+        ADD COLUMN high_limit DECIMAL(10,2) NULL AFTER low_limit`,
+    ],
+  },
+  {
+    id: "026_sku_weight_only",
+    sql: [
+      // The low / high limits come from the scale's tags (Scale Monitoring); the SKU keeps its target weight.
+      `ALTER TABLE skus DROP COLUMN low_limit, DROP COLUMN high_limit`,
+    ],
+  },
 ];
