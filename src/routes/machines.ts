@@ -120,18 +120,9 @@ machinesRouter.get("/:id/shift-skus", async (req, res) => {
   res.json(await currentShiftSkuRuns(machine.id));
 });
 
-/**
- * `?from=&to=[&signal=key][&low=key][&high=key]`: one weight signal with its low / high limit tags and the SKUs run
- * with their target weight (`ScaleMonitor`). `low` / `high` = "none" turns a limit off.
- */
+/** `?from=&to=`: the recorded fields of the machine's weight scale and the SKUs run (`ScaleMonitor`). */
 machinesRouter.get("/:id/scale-monitor", async (req, res) => {
-  res.json(
-    await scaleMonitor(await getMachine(req.params.id), req.query.from, req.query.to, {
-      signal: req.query.signal,
-      low: req.query.low,
-      high: req.query.high,
-    })
-  );
+  res.json(await scaleMonitor(await getMachine(req.params.id), req.query.from, req.query.to));
 });
 
 machinesRouter.get("/:id/trend", async (req, res) => {
