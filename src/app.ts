@@ -1,4 +1,5 @@
 import cors from "cors";
+import { corsOptions } from "./config/cors.js";
 import express, { type ErrorRequestHandler } from "express";
 import { env } from "./config/env.js";
 import { HttpError } from "./lib/http-error.js";
@@ -24,7 +25,7 @@ const errorHandler: ErrorRequestHandler = (err, _req, res, _next) => {
 
 export function createApp() {
   const app = express();
-  app.use(cors({ origin: env.corsOrigin }));
+  app.use(cors(corsOptions));
   // Machine photos are sent as data URLs, so allow a bit more than the 1.5 MB photo limit.
   app.use(express.json({ limit: "2mb" }));
 

@@ -1,6 +1,7 @@
 import type { Server as HttpServer } from "node:http";
 import { Server } from "socket.io";
 import { env } from "../config/env.js";
+import { corsOptions } from "../config/cors.js";
 import { license } from "../services/license.js";
 import { getLatest, type PollResult } from "../services/poller.js";
 import type { MachineMonitoring, MachineOee } from "../types/oee.js";
@@ -26,7 +27,7 @@ const room = (machineId: string) => `machine:${machineId}`;
 
 export function createSocketServer(httpServer: HttpServer) {
   const io = new Server<ClientToServer, ServerToClient>(httpServer, {
-    cors: { origin: env.corsOrigin },
+    cors: corsOptions,
     // Refuse the connection itself without a license.
     allowRequest: (_req, callback) => callback(license.isLicensed() ? null : "LICENSE_REQUIRED", license.isLicensed()),
   });

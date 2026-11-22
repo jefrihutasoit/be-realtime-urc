@@ -13,7 +13,10 @@ const num = (key: string, fallback: number) => {
 
 export const env = {
   port: num("PORT", 4000),
-  corsOrigin: (process.env.CORS_ORIGIN ?? "http://localhost:3000").split(",").map((s) => s.trim()),
+  /** Allowed CORS origins; null = auto (localhost + private LAN). See config/cors.ts. */
+  corsOrigins: process.env.CORS_ORIGIN
+    ? process.env.CORS_ORIGIN.split(",").map((s) => s.trim()).filter(Boolean)
+    : null,
   pollIntervalMs: num("POLL_INTERVAL_MS", 2000),
   gatewayMode: process.env.GATEWAY_MODE ?? "database",
   idealRatePpm: num("IDEAL_RATE_PPM", 60),

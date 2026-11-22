@@ -57,27 +57,41 @@ console.log("[build] obfuscating…");
 const { default: Obfuscator } = await import("javascript-obfuscator");
 const code = await readFile(bundled, "utf8");
 const result = Obfuscator.obfuscate(code, {
-  // Conservative but strong: safe for a Node server, hard to read, small runtime cost.
+  // Low-overhead profile: the code is already minified and renamed by esbuild; this hides the string
+  // literals and keeps names mangled without the heavy transforms (control-flow flattening, dead code,
+  // numbers-to-expressions, base64 string decoding, self-defending) that slow the hot paths — the OEE
+  // engine runs on every poll (every 2 s) and the summary query is compute-heavy. Still not readable or
+  // easy to patch. Set OBFUSCATE=heavy for the strong profile when runtime cost is not a concern.
   target: "node",
   compact: true,
-  controlFlowFlattening: true,
-  controlFlowFlatteningThreshold: 0.6,
-  deadCodeInjection: true,
-  deadCodeInjectionThreshold: 0.3,
-  stringArray: true,
-  stringArrayThreshold: 0.8,
-  stringArrayEncoding: ["base64"],
-  stringArrayCallsTransform: true,
-  stringArrayWrappersCount: 2,
-  splitStrings: true,
-  splitStringsChunkLength: 10,
-  identifierNamesGenerator: "mangled",
-  numbersToExpressions: true,
   simplify: true,
-  transformObjectKeys: true,
-  selfDefending: true,
+  identifierNamesGenerator: "mangled",
+  stringArray: true,
+  stringArrayThreshold: 0.75,
+  stringArrayEncoding: [], // plain (no base64 decode on every string access)
+  // Off: these add real CPU cost in hot loops.
+  controlFlowFlattening: false,
+  deadCodeInjection: false,
+  numbersToExpressions: false,
+  splitStrings: false,
+  stringArrayCallsTransform: false,
+  transformObjectKeys: false,
+  selfDefending: false,
   // ESM: do not touch the module syntax or reserved runtime names.
   reservedStrings: ["^node:"],
+  ...(process.env.OBFUSCATE === "heavy"
+    ? {
+        controlFlowFlattening: true,
+        controlFlowFlatteningThreshold: 0.5,
+        deadCodeInjection: true,
+        deadCodeInjectionThreshold: 0.2,
+        stringArrayEncoding: ["base64"],
+        stringArrayCallsTransform: true,
+        splitStrings: true,
+        splitStringsChunkLength: 10,
+        selfDefending: true,
+      }
+    : {}),
 });
 await writeFile(out, result.getObfuscatedCode());
 await rm(bundled);
